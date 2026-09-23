@@ -29,6 +29,7 @@ python3 io.py --host ./host --library publish/NativeDiagnosticsProbe.so --output
 python3 connect.py --host ./host --library publish/NativeDiagnosticsProbe.so --output connect-results
 python3 reverse.py --host ./host --library publish/NativeDiagnosticsProbe.so --output reverse-results
 python3 listener.py --host ./host --library publish/NativeDiagnosticsProbe.so --output listener-results
+python3 response.py --host ./host --library publish/NativeDiagnosticsProbe.so --output response-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
@@ -68,8 +69,22 @@ must retain exact values, process identity and endpoint ownership. Reverse
 connections also preserve partial requests and reconnect afterward. Twenty idle
 cycles check that stopping and restarting does not leak descriptors.
 
+`response.py` stalls a large environment response, retires the listener, then
+checks every byte after restart. Changing an environment value while paused must
+leave the original response intact; the next query must see the new value. Cases
+cover repeated pauses, half-closed and disconnected clients, reverse connections,
+and native children closing inherited endpoints. The children make no managed
+calls. A repeated success/disconnect case checks libc's live allocation counts
+and all three process-info formats. This also catches leaked command-line copies.
+
+Linux can wake `pthread_join` before removing the thread from `/proc`. The probe
+requires any residual task to have `PF_EXITING`, then requires its disappearance
+within a bounded wait before checking the paused state.
+
 The compiler's existing native-library EventSource warning remains visible. These
 checks do not enable managed fork support with diagnostics. Native cleanup tests
 fork without managed child calls; listener tests stop and restart without forking.
-Commands already sending responses, active trace sessions, sampling, child
-recovery and multiple runtime instances still need fork-aware lifetimes.
+Ordinary command responses now preserve queued output. Tracing commands transfer
+their connection to a session and still need that ownership handoff, interruptible
+descriptor receipt, active-session/sampling lifetimes, child recovery and support
+for multiple runtime instances.

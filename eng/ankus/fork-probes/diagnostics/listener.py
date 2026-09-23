@@ -59,7 +59,24 @@ def pause(process, expected, evidence):
         response = command(process, "p")
         assert response.startswith("listener "), response
         count = int(response.split()[1])
-        assert not listener_threads(process.pid), "listener thread survived the join"
+        remaining = listener_threads(process.pid)
+        # Linux wakes pthread_join before removing the exiting task from /proc.
+        # Require PF_EXITING for any residual entry, then require its removal.
+        removal_deadline = time.monotonic() + 2
+        while remaining:
+            snapshots = {}
+            for tid in remaining:
+                try:
+                    snapshot = Path(f"/proc/{process.pid}/task/{tid}/stat").read_text()
+                    flags = int(snapshot.rpartition(") ")[2].split()[6])
+                    assert flags & 4, "joined listener has not entered kernel exit"
+                    snapshots[str(tid)] = snapshot
+                except FileNotFoundError:
+                    snapshots[str(tid)] = "exited before stat read"
+            evidence.setdefault("kernel_exit_observations", []).append(snapshots)
+            assert time.monotonic() < removal_deadline, "joined listener remained in the kernel task list"
+            time.sleep(0.001)
+            remaining = listener_threads(process.pid)
         assert count <= expected, (count, expected)
         if count == expected:
             evidence["checkpoints"].append({"received": count, "retired_threads": before})

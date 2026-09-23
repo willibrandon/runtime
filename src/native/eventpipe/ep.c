@@ -620,10 +620,11 @@ void
 log_process_info_event (EventPipeEventSource *event_source)
 {
 	// Get the managed command line.
-	const ep_char8_t *cmd_line = ep_rt_diagnostics_command_line_get ();
+	ep_char8_t *cmd_line = ep_rt_diagnostics_command_line_get ();
 
 	// Log the process information event.
 	ep_event_source_send_process_info (event_source, cmd_line);
+	ep_rt_utf8_string_free (cmd_line);
 }
 
 static

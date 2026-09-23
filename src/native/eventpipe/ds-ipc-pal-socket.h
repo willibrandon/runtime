@@ -67,6 +67,14 @@ struct _DiagnosticsIpcStream_Internal {
 	IpcStream stream;
 	ds_ipc_socket_t client_socket;
 	DiagnosticsIpcConnectionMode mode;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	// A command response is owned by the listener until all queued bytes are sent.
+	struct _DiagnosticsIpcResponseChunk *response_head;
+	struct _DiagnosticsIpcResponseChunk *response_tail;
+	uint64_t response_remaining;
+	bool response_buffered;
+	bool response_failed;
+#endif
 };
 
 #if !defined(DS_INLINE_GETTER_SETTER) && !defined(DS_IMPL_IPC_PAL_SOCKET_GETTER_SETTER)

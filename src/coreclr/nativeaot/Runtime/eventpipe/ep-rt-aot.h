@@ -1435,11 +1435,11 @@ ep_rt_managed_command_line_get (void)
 }
 
 static
-const ep_char8_t *
+ep_char8_t *
 ep_rt_diagnostics_command_line_get (void)
 {
     STATIC_CONTRACT_NOTHROW;
-    extern const ep_char8_t * ep_rt_aot_diagnostics_command_line_get (void);
+    extern ep_char8_t * ep_rt_aot_diagnostics_command_line_get (void);
     return ep_rt_aot_diagnostics_command_line_get();
 }
 

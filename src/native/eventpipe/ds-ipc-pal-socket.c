@@ -1527,6 +1527,118 @@ ds_ipc_to_string (
  * DiagnosticsIpcStream.
  */
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+typedef struct _DiagnosticsIpcResponseChunk {
+	struct _DiagnosticsIpcResponseChunk *next;
+	uint32_t length;
+	uint32_t sent;
+	uint8_t *bytes;
+} DiagnosticsIpcResponseChunk;
+
+static bool ipc_stream_capture_response (DiagnosticsIpcStream *stream, const uint8_t *buffer, uint32_t length)
+{
+	if (stream->response_failed)
+		return false;
+
+	if (length == 0)
+		return true;
+
+	DiagnosticsIpcResponseChunk *chunk = ep_rt_object_alloc (DiagnosticsIpcResponseChunk);
+	if (chunk == NULL) {
+		stream->response_failed = true;
+		return false;
+	}
+
+	chunk->bytes = ep_rt_object_array_alloc (uint8_t, length);
+	if (chunk->bytes == NULL) {
+		ep_rt_object_free (chunk);
+		stream->response_failed = true;
+		return false;
+	}
+
+	memcpy (chunk->bytes, buffer, length);
+	chunk->next = NULL;
+	chunk->length = length;
+	chunk->sent = 0;
+	if (stream->response_tail != NULL)
+		stream->response_tail->next = chunk;
+	else
+		stream->response_head = chunk;
+
+	stream->response_tail = chunk;
+	stream->response_remaining += length;
+	return true;
+}
+
+void ds_ipc_stream_begin_response (DiagnosticsIpcStream *stream)
+{
+	EP_ASSERT (!stream->response_buffered && stream->response_head == NULL);
+	stream->response_buffered = true;
+}
+
+uint64_t ds_ipc_stream_response_remaining (DiagnosticsIpcStream *stream)
+{
+	return stream->response_remaining;
+}
+
+int32_t ds_ipc_stream_resume_response (DiagnosticsIpcStream *stream, int interrupt_fd)
+{
+	EP_ASSERT (stream->response_buffered);
+	if (stream->response_failed)
+		return 0;
+
+	IpcSocketDeadline deadline;
+	ipc_deadline_init (&deadline, IPC_TIMEOUT_INFINITE);
+	while (stream->response_head != NULL) {
+		ds_ipc_pollfd_t descriptors [2];
+		descriptors [0].fd = stream->client_socket;
+		descriptors [0].events = POLLOUT;
+		descriptors [0].revents = 0;
+		descriptors [1].fd = interrupt_fd;
+		descriptors [1].events = POLLIN;
+		descriptors [1].revents = 0;
+		if (ipc_poll_fds_with_deadline (descriptors, 2, &deadline) < 0)
+			return 0;
+
+		if (descriptors [1].revents != 0)
+			return -2;
+
+		DiagnosticsIpcResponseChunk *chunk = stream->response_head;
+		uint32_t remaining = chunk->length - chunk->sent;
+		ssize_t count = send (stream->client_socket, chunk->bytes + chunk->sent, remaining > INT_MAX ? INT_MAX : remaining, 0);
+		if (ipc_retry_syscall (count) || (count == -1 && ipc_socket_would_block ()))
+			continue;
+
+		if (count <= 0)
+			return 0;
+
+		chunk->sent += (uint32_t)count;
+		stream->response_remaining -= (uint32_t)count;
+		if (chunk->sent == chunk->length) {
+			stream->response_head = chunk->next;
+			ep_rt_object_array_free (chunk->bytes);
+			ep_rt_object_free (chunk);
+		}
+	}
+
+	stream->response_tail = NULL;
+	return 1;
+}
+
+void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream)
+{
+	while (stream->response_head != NULL) {
+		DiagnosticsIpcResponseChunk *chunk = stream->response_head;
+		stream->response_head = chunk->next;
+		ep_rt_object_array_free (chunk->bytes);
+		ep_rt_object_free (chunk);
+	}
+
+	stream->response_buffered = false;
+	ds_ipc_stream_free (stream);
+}
+#endif
+
 static
 void
 ipc_stream_free_func (void *object)
@@ -1582,6 +1694,14 @@ ipc_stream_write_func (
 	bool success = false;
 	DiagnosticsIpcStream *ipc_stream = (DiagnosticsIpcStream *)object;
 	ssize_t total_bytes_written = 0;
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	if (ipc_stream->response_buffered) {
+		bool captured = ipc_stream_capture_response (ipc_stream, buffer, bytes_to_write);
+		*bytes_written = captured ? bytes_to_write : 0;
+		return captured;
+	}
+#endif
 
 	success = ipc_socket_send (ipc_stream->client_socket, buffer, bytes_to_write, &total_bytes_written, timeout_ms);
 	ep_raise_error_if_nok (success == true);
@@ -1673,6 +1793,12 @@ ds_ipc_stream_free (DiagnosticsIpcStream *ipc_stream)
 {
 	if(!ipc_stream)
 		return;
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	// The listener releases the stream after sending or discarding the response.
+	if (ipc_stream->response_buffered)
+		return;
+#endif
 
 	ds_ipc_stream_close (ipc_stream, NULL);
 	ep_rt_object_free (ipc_stream);

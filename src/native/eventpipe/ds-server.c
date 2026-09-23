@@ -23,8 +23,16 @@ static int _server_interrupt [2] = {-1, -1};
 static volatile uint32_t _server_pausing;
 static bool _server_paused;
 static DiagnosticsIpcStream *_server_pending_stream;
+static DiagnosticsIpcStream *_server_response_stream;
 static DiagnosticsIpcMessage _server_pending_message;
 static uint32_t _server_received;
+
+static void server_begin_response (DiagnosticsIpcStream *stream)
+{
+	EP_ASSERT (_server_response_stream == NULL);
+	ds_ipc_stream_begin_response (stream);
+	_server_response_stream = stream;
+}
 
 static bool server_create_interrupt (void)
 {
@@ -153,6 +161,16 @@ static size_t server_loop_tick (void* data) {
 	if (ep_rt_volatile_load_uint32_t (&_server_pausing) != 0)
 		return 1;
 
+	if (_server_response_stream != NULL) {
+		int32_t result = ds_ipc_stream_resume_response (_server_response_stream, _server_interrupt [0]);
+		if (result == -2)
+			return 1;
+
+		ds_ipc_stream_end_response (_server_response_stream);
+		_server_response_stream = NULL;
+		return 0;
+	}
+
 	DiagnosticsIpcStream *stream = _server_pending_stream;
 	DiagnosticsIpcMessage *message = &_server_pending_message;
 	if (stream == NULL) {
@@ -173,6 +191,7 @@ static size_t server_loop_tick (void* data) {
 	_server_pending_stream = NULL;
 	_server_received = 0;
 	if (read_result == 0) {
+		server_begin_response (stream);
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
 		ds_ipc_stream_free (stream);
 		ds_ipc_message_fini (message);
@@ -199,9 +218,16 @@ static size_t server_loop_tick (void* data) {
 	}
 #endif
 
-	if (ep_rt_utf8_string_compare (
+	bool valid_magic = ep_rt_utf8_string_compare (
 		(const ep_char8_t *)ds_ipc_header_get_magic_ref (ds_ipc_message_get_header_ref (message)),
-		(const ep_char8_t *)DOTNET_IPC_V1_MAGIC) != 0) {
+		(const ep_char8_t *)DOTNET_IPC_V1_MAGIC) == 0;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	// Tracing commands can transfer the connection to a session. Their lifetime
+	// needs a separate handoff; ordinary command responses remain listener-owned.
+	if (!valid_magic || ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (message)) != DS_SERVER_COMMANDSET_EVENTPIPE)
+		server_begin_response (stream);
+#endif
+	if (!valid_magic) {
 
 		ds_ipc_message_send_error (stream, DS_IPC_E_UNKNOWN_MAGIC);
 		ds_ipc_stream_free (stream);
@@ -258,6 +284,14 @@ EP_RT_DEFINE_THREAD_FUNC (server_thread)
 uint32_t ds_server_paused_input_bytes (void)
 {
 	return _server_paused ? _server_received : UINT32_MAX;
+}
+
+uint64_t ds_server_paused_output_bytes (void)
+{
+	if (!_server_paused)
+		return UINT64_MAX;
+
+	return _server_response_stream != NULL ? ds_ipc_stream_response_remaining (_server_response_stream) : 0;
 }
 
 bool ds_server_pause_listener (void)

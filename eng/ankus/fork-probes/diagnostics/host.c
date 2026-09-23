@@ -1,5 +1,6 @@
 #include <dlfcn.h>
 #include <errno.h>
+#include <malloc.h>
 #include <fcntl.h>
 #include <stdbool.h>
 #include <signal.h>
@@ -19,6 +20,7 @@ typedef int32_t (*enable_fn)(void);
 typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
 typedef int (*connect_fn)(const char*, uint32_t);
 typedef uint32_t (*listener_fn)(bool);
+typedef uint64_t (*pending_response_fn)(void);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -72,6 +74,7 @@ main(int argc, char **argv)
     stream_io_fn stream_io = (stream_io_fn) dlsym(library, "ankus_probe_stream_io");
     connect_fn connect_client = (connect_fn) dlsym(library, "ankus_probe_connect");
     listener_fn listener_checkpoint = (listener_fn) dlsym(library, "ankus_probe_listener_checkpoint");
+    pending_response_fn pending_response = (pending_response_fn) dlsym(library, "ankus_probe_pending_response");
     if (initialize == NULL || shutdown_server == NULL || listen_failure == NULL || enable == NULL || initialize(getpid(), report) != 0)
     {
         return 71;
@@ -136,6 +139,24 @@ main(int argc, char **argv)
             }
 
             printf("listener %u\n", listener_checkpoint(command[0] == 'p'));
+        }
+        else if (command[0] == 'o')
+        {
+            if (pending_response == NULL)
+            {
+                return 76;
+            }
+
+            printf("pending %llu\n", (unsigned long long) pending_response());
+        }
+        else if (command[0] == 'a')
+        {
+            struct mallinfo2 allocation = mallinfo2();
+            printf("allocated %zu\n", allocation.uordblks);
+        }
+        else if (command[0] == 'm')
+        {
+            printf("changed %d\n", setenv("ANKUS_RESPONSE_CHANGE", "after", 1));
         }
         else if (command[0] == 'v')
         {

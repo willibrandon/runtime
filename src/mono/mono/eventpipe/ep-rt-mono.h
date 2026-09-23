@@ -1573,7 +1573,7 @@ ep_rt_managed_command_line_get (void)
 }
 
 static
-const ep_char8_t *
+ep_char8_t *
 ep_rt_diagnostics_command_line_get (void)
 {
 	const ep_char8_t * cmd_line = ep_rt_managed_command_line_get ();
@@ -1583,7 +1583,7 @@ ep_rt_diagnostics_command_line_get (void)
 	if (cmd_line == NULL)
 		cmd_line = ep_rt_os_command_line_get ();
 
-	return cmd_line;
+	return ep_rt_utf8_string_dup (cmd_line);
 }
 
 static

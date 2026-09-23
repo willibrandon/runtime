@@ -62,6 +62,7 @@ def process_info_response(connection, expected_pid):
         offset += length * 2
     assert offset == len(payload)
     assert fields[1:3] == ["Linux", "x64"] and fields[3] == "NativeDiagnosticsProbe", fields
+    assert connection.recv(1) == b"", "process-info response connection was not released"
     return {"pid": pid, "cookie": cookie, "fields": fields}
 
 

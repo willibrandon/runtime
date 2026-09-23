@@ -214,7 +214,7 @@ ep_rt_aot_execute_rundown (dn_vector_ptr_t* execution_checkpoints)
     ETW::EnumerationLog::EndRundown();
 }
 
-const ep_char8_t *
+ep_char8_t *
 ep_rt_aot_diagnostics_command_line_get (void)
 {
     // shipping criteria: no EVENTPIPE-NATIVEAOT-TODO left in the codebase
@@ -225,19 +225,20 @@ ep_rt_aot_diagnostics_command_line_get (void)
 #elif TARGET_LINUX
     FILE *cmdline_file = ::fopen("/proc/self/cmdline", "r");
     if (cmdline_file == nullptr)
-        return "";
+        return ep_rt_utf8_string_dup("");
 
     char *line = NULL;
     size_t line_len = 0;
     if (::getline (&line, &line_len, cmdline_file) == -1) {
         ::fclose (cmdline_file);
-        return "";
+        ::free (line);
+        return ep_rt_utf8_string_dup("");
     }
 
     ::fclose (cmdline_file);
-    return reinterpret_cast<const ep_char8_t*>(line);
+    return reinterpret_cast<ep_char8_t*>(line);
 #else
-    return "";
+    return ep_rt_utf8_string_dup("");
 #endif
 }
 

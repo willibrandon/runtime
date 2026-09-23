@@ -48,6 +48,12 @@ extern void ds_ipc_stream_factory_close_ports(ds_ipc_error_callback_func callbac
 extern bool ds_server_pause_listener();
 extern bool ds_server_resume_listener();
 extern uint32_t ds_server_paused_input_bytes();
+extern uint64_t ds_server_paused_output_bytes();
+
+extern "C" __attribute__((visibility("default"))) uint64_t ankus_probe_pending_response()
+{
+    return ds_server_paused_output_bytes();
+}
 
 extern "C" __attribute__((visibility("default"))) uint32_t ankus_probe_listener_checkpoint(bool pause)
 {

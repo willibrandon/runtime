@@ -561,8 +561,9 @@ static
 const ep_char8_t *
 ep_rt_managed_command_line_get (void);
 
+// Returns an owned copy; release it with ep_rt_utf8_string_free.
 static
-const ep_char8_t *
+ep_char8_t *
 ep_rt_diagnostics_command_line_get (void);
 
 /*

@@ -667,7 +667,9 @@ process_protocol_helper_get_process_info (
 	DiagnosticsProcessInfoPayload payload;
 	DiagnosticsProcessInfoPayload *process_info_payload = NULL;
 
-	command_line = ep_rt_utf8_to_utf16le_string (ep_rt_diagnostics_command_line_get ());
+	ep_char8_t *command_line_utf8 = ep_rt_diagnostics_command_line_get ();
+	command_line = ep_rt_utf8_to_utf16le_string (command_line_utf8);
+	ep_rt_utf8_string_free (command_line_utf8);
 	ep_raise_error_if_nok (command_line != NULL);
 
 	os_info = ep_rt_utf8_to_utf16le_string (ep_event_source_get_os_info ());
@@ -729,7 +731,9 @@ process_protocol_helper_get_process_info_2 (
 	DiagnosticsProcessInfo2Payload payload;
 	DiagnosticsProcessInfo2Payload *process_info_2_payload = NULL;
 
-	command_line = ep_rt_utf8_to_utf16le_string (ep_rt_diagnostics_command_line_get ());
+	ep_char8_t *command_line_utf8 = ep_rt_diagnostics_command_line_get ();
+	command_line = ep_rt_utf8_to_utf16le_string (command_line_utf8);
+	ep_rt_utf8_string_free (command_line_utf8);
 	ep_raise_error_if_nok (command_line != NULL);
 
 	os_info = ep_rt_utf8_to_utf16le_string (ep_event_source_get_os_info ());
@@ -802,7 +806,9 @@ process_protocol_helper_get_process_info_3 (
 	DiagnosticsProcessInfo3Payload payload;
 	DiagnosticsProcessInfo3Payload *process_info_3_payload = NULL;
 
-	command_line = ep_rt_utf8_to_utf16le_string (ep_rt_diagnostics_command_line_get ());
+	ep_char8_t *command_line_utf8 = ep_rt_diagnostics_command_line_get ();
+	command_line = ep_rt_utf8_to_utf16le_string (command_line_utf8);
+	ep_rt_utf8_string_free (command_line_utf8);
 	ep_raise_error_if_nok (command_line != NULL);
 
 	os_info = ep_rt_utf8_to_utf16le_string (ep_event_source_get_os_info ());
