@@ -130,6 +130,8 @@ void RhEnableFinalization()
 }
 
 static int32_t g_fullGcCountSeenByFinalization;
+// Only the finalizer accesses this flag, spanning its entire managed pass.
+static bool g_finalizerForkWorkActive;
 
 // Indicate that the current round of finalizations is complete.
 EXTERN_C void QCALLTYPE RhpSignalFinalizationComplete(uint32_t fcount, int32_t observedFullGcCount)
@@ -187,6 +189,12 @@ EXTERN_C void QCALLTYPE RhWaitForPendingFinalizers(UInt32_BOOL allowReentrantWai
 // (returns false and the finalizer thread should initiate a garbage collection).
 EXTERN_C UInt32_BOOL QCALLTYPE RhpWaitForFinalizerRequest()
 {
+    if (g_finalizerForkWorkActive)
+    {
+        RhExitForkWork();
+        g_finalizerForkWorkActive = false;
+    }
+
     // We can wait for two events; finalization queue has been populated and low memory resource notification.
     // But if the latter is signalled we shouldn't wait on it again immediately -- if the garbage collection
     // the finalizer thread initiates as a result is not sufficient to remove the low memory condition the
@@ -210,6 +218,19 @@ EXTERN_C UInt32_BOOL QCALLTYPE RhpWaitForFinalizerRequest()
 
         uint32_t uResult = PalCompatibleWaitAny(/*alertable=*/ FALSE, uTimeout, cWaitHandles, rgWaitHandles, /*allowReentrantWait=*/ FALSE);
         RhForkFinalizerCheckpoint();
+
+        if (uResult == WAIT_OBJECT_0 || uResult == WAIT_OBJECT_0 + 1)
+        {
+            while (RhTryEnterForkWork() == 0)
+            {
+                // Retirement can precede the finalizer checkpoint request.
+                // Remain outside managed frames and all event waits.
+                RhForkFinalizerCheckpoint();
+                PalSleep(1);
+            }
+
+            g_finalizerForkWorkActive = true;
+        }
 
         switch (uResult)
         {

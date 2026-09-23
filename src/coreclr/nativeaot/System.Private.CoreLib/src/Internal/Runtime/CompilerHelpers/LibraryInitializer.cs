@@ -19,6 +19,9 @@ namespace Internal.Runtime.CompilerHelpers
         {
             PreallocatedOutOfMemoryException.Initialize();
             ClassConstructorRunner.Initialize();
+#if TARGET_UNIX
+            System.Threading.ForkThreadServices.Initialize();
+#endif
         }
     }
 }

@@ -38,7 +38,7 @@ internal static unsafe class QueuedWaitProbe
     private static int s_marker;
 
     /// <summary>
-    /// Records whether the occupied worker observed actual native wait-thread exit.
+    /// Records whether the occupied worker observed native fork preparation.
     /// </summary>
     private static int s_workerResult;
 
@@ -58,7 +58,7 @@ internal static unsafe class QueuedWaitProbe
     private static delegate* unmanaged[Cdecl]<int, int, long, long> s_control;
 
     /// <summary>
-    /// Queues original callbacks behind one worker which retires only after the wait threads exit.
+    /// Queues original callbacks behind one worker which retires only after native fork preparation begins.
     /// </summary>
     /// <param name="token">The original identity already stored by the native host.</param>
     /// <param name="control">The process-lifetime native observation callback.</param>
@@ -137,7 +137,7 @@ internal static unsafe class QueuedWaitProbe
     }
 
     /// <summary>
-    /// Occupies the only worker until native wait-thread retirement proves preparation has closed admission.
+    /// Occupies the only worker until native fork preparation requests callback retirement.
     /// </summary>
     private static void HoldWorker()
     {

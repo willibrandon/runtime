@@ -50,6 +50,11 @@ namespace
     std::atomic<uint32_t> s_threadShutdowns(0);
     std::atomic<bool> s_backgroundWorkerStarted(false);
     std::atomic<bool> s_servicesRegistered(false);
+    // Close admission atomically with the last callback's exit, preserving queued work.
+    constexpr uint32_t WorkPreparing = 1u << 31;
+    constexpr uint32_t WorkRetired = 1u << 30;
+    constexpr uint32_t WorkCountMask = WorkRetired - 1;
+    std::atomic<uint32_t> s_work(0);
     ForkServiceCallback s_prepareServices;
     ForkServiceCallback s_resumeParentServices;
     ForkServiceCallback s_resetChildServices;
@@ -262,6 +267,78 @@ namespace
         InvokeServiceCallback(s_resumeChildServices,
             "NativeAOT fork prototype: managed child service resume failed.\n");
         s_state.store(ForkState::Idle);
+    }
+}
+
+extern "C" int32_t RhTryEnterForkWork()
+{
+    uint32_t observed = s_work.load();
+    do
+    {
+        if ((observed & WorkRetired) != 0)
+        {
+            return 0;
+        }
+
+        if ((observed & WorkCountMask) == WorkCountMask)
+        {
+            ForkFailure("NativeAOT fork prototype: callback accounting overflowed.\n");
+        }
+    } while (!s_work.compare_exchange_weak(observed, observed + 1));
+
+    return 1;
+}
+
+extern "C" void RhExitForkWork()
+{
+    uint32_t observed = s_work.load();
+    uint32_t updated;
+    do
+    {
+        if ((observed & WorkCountMask) == 0 || (observed & WorkRetired) != 0)
+        {
+            ForkFailure("NativeAOT fork prototype: callback accounting underflowed.\n");
+        }
+
+        updated = observed - 1;
+        if (updated == WorkPreparing)
+        {
+            updated |= WorkRetired;
+        }
+    } while (!s_work.compare_exchange_weak(observed, updated));
+}
+
+extern "C" void RhRequestForkWorkRetirement()
+{
+    uint32_t observed = s_work.load();
+    uint32_t updated;
+    do
+    {
+        updated = observed | WorkPreparing;
+        if ((observed & WorkCountMask) == 0)
+        {
+            updated |= WorkRetired;
+        }
+    } while (!s_work.compare_exchange_weak(observed, updated));
+}
+
+extern "C" __attribute__((visibility("default"))) int32_t RhGetForkWorkState()
+{
+    uint32_t state = s_work.load();
+    return (state & WorkRetired) != 0 ? 2 : (state & WorkPreparing) != 0 ? 1 : 0;
+}
+
+extern "C" int32_t RhIsForkWorkRetired()
+{
+    return (s_work.load() & WorkRetired) != 0;
+}
+
+extern "C" void RhResumeForkWork()
+{
+    uint32_t expected = WorkPreparing | WorkRetired;
+    if (!s_work.compare_exchange_strong(expected, 0))
+    {
+        ForkFailure("NativeAOT fork prototype: callback resume requires completed retirement.\n");
     }
 }
 
@@ -483,6 +560,13 @@ void RhForkRecordBackgroundWorker()
 }
 
 #else
+
+extern "C" int32_t RhTryEnterForkWork() { return 1; }
+extern "C" void RhExitForkWork() { }
+extern "C" void RhRequestForkWorkRetirement() { }
+extern "C" int32_t RhIsForkWorkRetired() { return 1; }
+extern "C" int32_t RhGetForkWorkState() { return 0; }
+extern "C" void RhResumeForkWork() { }
 
 extern "C" int32_t RhRegisterForkServiceCallbacks(
     ForkServiceCallback, ForkServiceCallback, ForkServiceCallback, ForkServiceCallback)

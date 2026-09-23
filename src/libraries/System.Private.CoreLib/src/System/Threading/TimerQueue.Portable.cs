@@ -187,7 +187,7 @@ namespace System.Threading
             while (true)
             {
 #if NATIVEAOT && TARGET_UNIX
-                if (ForkThreadServices.IsPreparing)
+                if (ForkThreadServices.AreWorkersRetiring)
                 {
                     return;
                 }
@@ -195,7 +195,7 @@ namespace System.Threading
                 timerEvent.WaitOne(shortestWaitDurationMs);
 
 #if NATIVEAOT && TARGET_UNIX
-                if (ForkThreadServices.IsPreparing)
+                if (ForkThreadServices.AreWorkersRetiring)
                 {
                     return;
                 }

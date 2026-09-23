@@ -42,7 +42,9 @@ enum retained_mode
     RETAINED_WAITS = 3,
     RETAINED_WAIT_RETIREMENT = 4,
     RETAINED_QUEUED_WAITS = 5,
-    RETAINED_FINALIZER_WAIT = 6
+    RETAINED_FINALIZER_WAIT = 6,
+    RETAINED_BLOCKING_WORKER = 7,
+    RETAINED_BLOCKING_FINALIZER = 8
 };
 
 enum retained_size
@@ -66,10 +68,14 @@ enum retained_command
     RETAINED_SET_DEADLINE = 10,
     RETAINED_SET_TOKEN = 11,
     RETAINED_READ_TOKEN = 12,
-    RETAINED_WAIT_FOR_WAITER_EXIT = 13,
+    RETAINED_WAIT_FOR_CHECKPOINT = 13,
     RETAINED_UNREGISTER_COMPLETED = 14,
-    RETAINED_SET_QUEUED_WAIT_COUNT = 15
+    RETAINED_SET_QUEUED_WAIT_COUNT = 15,
+    RETAINED_WAIT_FOR_PREPARATION = 16
 };
+
+/* Optional observation exported only by the fork probe, never by extension consumers. */
+static enable_fn query_fork_work_state;
 
 /* Host settings never change managed runtime configuration or the process environment. */
 struct options
@@ -117,7 +123,8 @@ static const char *stage_names[] = {"invalid", "graph", "pid", "gc-finalizer", "
 static const char *retained_stage_names[] =
 {
     "invalid", "retained-timer", "retained-queue", "retained-waits",
-    "retained-wait-retirement", "retained-queued-waits", "retained-finalizer-wait"
+    "retained-wait-retirement", "retained-queued-waits", "retained-finalizer-wait",
+    "retained-blocking-worker", "retained-blocking-finalizer"
 };
 
 /* Appends trusted fixed labels into the bounded JSON record. */
@@ -391,7 +398,7 @@ retained_control(int32_t command, int32_t index, int64_t value)
         case RETAINED_READ_TOKEN:
             return index >= 0 && index < 2 ? retained.token[index] : 0;
 
-        case RETAINED_WAIT_FOR_WAITER_EXIT:
+        case RETAINED_WAIT_FOR_CHECKPOINT:
         {
             retained.waiters_before = count_wait_threads();
             if (retained.waiters_before < 2)
@@ -405,10 +412,10 @@ retained_control(int32_t command, int32_t index, int64_t value)
             {
                 if (atomic_load_explicit(&retained.release, memory_order_acquire) != 0)
                 {
-                    retained.waiters_after = count_wait_threads();
-                    if (retained.waiters_after <= 0)
+                    int state = query_fork_work_state != NULL ? query_fork_work_state() : -1;
+                    if (state == 1 || (state == -1 && count_wait_threads() == 0))
                     {
-                        return retained.waiters_after == 0 ? 1 : 0;
+                        return 1;
                     }
                 }
 
@@ -424,6 +431,26 @@ retained_control(int32_t command, int32_t index, int64_t value)
         case RETAINED_UNREGISTER_COMPLETED:
             atomic_store_explicit(&retained.ready, value == 1 ? 2 : -1, memory_order_release);
             return 1;
+
+        case RETAINED_WAIT_FOR_PREPARATION:
+        {
+            int64_t deadline = milliseconds() + 4000;
+            while (milliseconds() < deadline)
+            {
+                if (atomic_load_explicit(&retained.release, memory_order_acquire) != 0 &&
+                    (query_fork_work_state != NULL ? query_fork_work_state() == 1 : count_wait_threads() == 0))
+                {
+                    return 1;
+                }
+
+                if (!pause_milliseconds(1))
+                {
+                    return 0;
+                }
+            }
+
+            return 0;
+        }
 
         case RETAINED_SET_QUEUED_WAIT_COUNT:
             retained.queued_wait_count = value;
@@ -443,6 +470,7 @@ capture_retained_snapshot(void)
         return;
     }
 
+    retained.waiters_after = count_wait_threads();
     retained.snapshot_time = milliseconds();
     retained.snapshot_valid = 1;
     retained.pending_global = 0;
@@ -513,6 +541,23 @@ capture_retained_snapshot(void)
             retained.snapshot_valid = 0;
         }
     }
+    else if (retained.mode == RETAINED_BLOCKING_WORKER || retained.mode == RETAINED_BLOCKING_FINALIZER)
+    {
+        if (retained.snapshot_counts[0] != 1 || retained.queued_wait_count != 1 ||
+            retained.waiters_before < 2 || retained.waiters_after != 0 ||
+            atomic_load_explicit(&retained.ready, memory_order_acquire) != 2)
+        {
+            retained.snapshot_valid = 0;
+        }
+
+        for (int index = 1; index < RETAINED_ITEM_COUNT; index++)
+        {
+            if (retained.snapshot_counts[index] != 0)
+            {
+                retained.snapshot_valid = 0;
+            }
+        }
+    }
     else
     {
         retained.snapshot_valid = 0;
@@ -524,7 +569,8 @@ static void
 release_retained_worker(void)
 {
     if (retained.armed && (retained.mode == RETAINED_QUEUE || retained.mode == RETAINED_WAIT_RETIREMENT ||
-                          retained.mode == RETAINED_QUEUED_WAITS || retained.mode == RETAINED_FINALIZER_WAIT))
+                          retained.mode == RETAINED_QUEUED_WAITS || retained.mode == RETAINED_FINALIZER_WAIT ||
+                          retained.mode == RETAINED_BLOCKING_WORKER || retained.mode == RETAINED_BLOCKING_FINALIZER))
     {
         atomic_store_explicit(&retained.release, 1, memory_order_release);
     }
@@ -577,7 +623,8 @@ emit_retained_snapshot(void)
     }
 
     if (retained.mode == RETAINED_WAIT_RETIREMENT || retained.mode == RETAINED_QUEUED_WAITS ||
-        retained.mode == RETAINED_FINALIZER_WAIT)
+        retained.mode == RETAINED_FINALIZER_WAIT || retained.mode == RETAINED_BLOCKING_WORKER ||
+        retained.mode == RETAINED_BLOCKING_FINALIZER)
     {
         emit("snapshot-waiters-before", 0, retained.waiters_before);
         emit("snapshot-waiters-after", 0, retained.waiters_after);
@@ -874,6 +921,7 @@ run_worker(struct options options)
         return 70;
     }
 
+    query_fork_work_state = (enable_fn)dlsym(library, "RhGetForkWorkState");
     initialize_fn initialize = (initialize_fn) dlsym(library, "fork_probe_initialize");
     snapshot_fn snapshot = (snapshot_fn) dlsym(library, "fork_probe_snapshot");
     run_fn run = (run_fn) dlsym(library, "fork_probe_run");
@@ -1057,6 +1105,14 @@ main(int argc, char **argv)
         else if (strcmp(argv[argument], "--retained-queued-waits") == 0 && options.retained == RETAINED_NONE)
         {
             options.retained = RETAINED_QUEUED_WAITS;
+        }
+        else if (strcmp(argv[argument], "--retained-blocking-worker") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_BLOCKING_WORKER;
+        }
+        else if (strcmp(argv[argument], "--retained-blocking-finalizer") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_BLOCKING_FINALIZER;
         }
         else if (strcmp(argv[argument], "--retained-finalizer-wait") == 0 && options.retained == RETAINED_NONE)
         {

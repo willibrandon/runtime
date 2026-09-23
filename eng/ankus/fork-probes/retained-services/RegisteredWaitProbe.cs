@@ -10,7 +10,7 @@ namespace NativeForkProbe;
 internal static unsafe class RegisteredWaitProbe
 {
     /// <summary>
-    /// Selects the caller that unregisters after native wait-thread retirement.
+    /// Selects the caller that unregisters during native fork preparation.
     /// </summary>
     internal enum RetirementCaller
     {
@@ -76,7 +76,7 @@ internal static unsafe class RegisteredWaitProbe
     private static int s_marker;
 
     /// <summary>
-    /// Records whether an active worker must unregister after every native wait thread exits.
+    /// Records whether an active worker must unregister during native fork preparation.
     /// </summary>
     private static bool s_checkRetirement;
 
@@ -91,7 +91,7 @@ internal static unsafe class RegisteredWaitProbe
     private static WeakReference? s_finalizerReference;
 
     /// <summary>
-    /// Records completion of unregister operations while framework activation is closed.
+    /// Records completion of unregister operations while fork preparation drains active callbacks.
     /// </summary>
     private static int s_retirementResult;
 
@@ -110,7 +110,7 @@ internal static unsafe class RegisteredWaitProbe
     /// </summary>
     /// <param name="token">The identity already stored by the native host.</param>
     /// <param name="control">The process-lifetime native observation callback.</param>
-    /// <param name="caller">The optional active worker or finalizer that unregisters after wait-thread retirement.</param>
+    /// <param name="caller">The optional active worker or finalizer that unregisters during fork preparation.</param>
     /// <returns>Zero after setup and completed cancellation.</returns>
     internal static int Prepare(Guid token, delegate* unmanaged[Cdecl]<int, int, long, long> control, RetirementCaller caller)
     {
@@ -182,7 +182,7 @@ internal static unsafe class RegisteredWaitProbe
     }
 
     /// <summary>
-    /// Removes both an inherited registration and a newly added registration after their waiter exits.
+    /// Removes both an inherited registration and a newly added registration while fork preparation drains active callbacks.
     /// </summary>
     private static void UnregisterAfterRetirement()
     {
@@ -364,7 +364,7 @@ internal static unsafe class RegisteredWaitProbe
     private sealed class RetirementFinalizer
     {
         /// <summary>
-        /// Removes the original wait after native wait-thread exit while fork preparation is active.
+        /// Removes the original wait while native fork preparation drains active callbacks.
         /// </summary>
         ~RetirementFinalizer() => UnregisterAfterRetirement();
     }

@@ -20,6 +20,13 @@ void RhForkRegisterFinalizer(Thread* thread);
 void RhForkThreadShutdownStarted();
 void RhForkThreadShutdownCompleted();
 
+// Shared admission covers pool callbacks, execution-context cleanup and finalizer passes.
+extern "C" int32_t RhTryEnterForkWork();
+extern "C" void RhExitForkWork();
+extern "C" void RhRequestForkWorkRetirement();
+extern "C" int32_t RhIsForkWorkRetired();
+extern "C" void RhResumeForkWork();
+
 // Owned workstation collector entry points; the generic collector ABI is unchanged.
 extern "C" bool RhIsOwnedGCForFork(IGCHeap* heap);
 extern "C" bool RhPrepareGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds);

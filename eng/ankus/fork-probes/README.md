@@ -13,7 +13,7 @@ compiler; use that SDK's `dotnet` command from each probe directory.
 From `retained-services`:
 
 ```sh
-dotnet publish -c Release -r linux-x64 -o publish -p:ForkRuntimePrototype=true -p:IlcSdkPath="$ANKUS_AOT_SDK/"
+dotnet publish -c Release -r linux-x64 -o publish -p:ForkRuntimePrototype=true -p:ForkWorkProtocol=true -p:IlcSdkPath="$ANKUS_AOT_SDK/"
 cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -pthread -o host
 ./host "$PWD/publish/NativeForkProbe.so" --retained-timer --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-queue --enable-fork
@@ -21,6 +21,8 @@ cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -pthread -o host
 ./host "$PWD/publish/NativeForkProbe.so" --retained-wait-retirement --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-queued-waits --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-finalizer-wait --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-blocking-worker --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-blocking-finalizer --enable-fork
 ```
 
 The timer must be unfired at the native checkpoint and fire once in each process.
@@ -29,18 +31,24 @@ all original items must complete once with exact values in each process.
 
 The wait checks span two wait threads. They preserve safe and unsafe callback
 contexts, original registrations and handles, one-shot and repeating signals,
-a finite timeout, and cancellation before fork. The retirement case also observes
-both wait threads disappear from Linux's native thread list before an active worker
-unregisters an existing wait and registers/unregisters another. Both operations must
-finish while thread activation is closed. Callback counts, completion notifications
-and independent parent/child state are checked exactly. The thread-exit observation
-uses `/proc/self/task` and requires Linux.
+a finite timeout, and cancellation before fork. Cleanup starts only after the native
+runtime reports that fork preparation is draining callbacks. The final native snapshot
+requires every wait thread to have exited; the thread inventory uses Linux's
+`/proc/self/task`.
 
 The queued-wait case keeps seventy original callbacks pending at the native
 checkpoint, with their unregister notifications still unsignaled. Each callback
 and notification must complete in both processes without resignal or reregistration.
-The finalizer case performs blocking unregister from an actual finalizer after the
-wait threads exit. These two cases also use the Linux thread-exit observation.
+The finalizer case performs blocking unregister from an actual unreachable object's
+finalizer during preparation.
+
+The two blocking cases unregister a wait whose callback is already queued. That
+callback itself needs a new timer, another registered wait, and another worker.
+Preparation must let this chain finish before stopping services. The snapshot
+requires the original callback and unregister operation to be complete, while
+sixty-nine other original waits remain unfired for parent and child to exercise.
+`ForkWorkProtocol` exports a read-only checkpoint observation for these native tests;
+it does not release callbacks, alter scheduling, or appear in consumer libraries.
 
 The same host checks successive generations:
 

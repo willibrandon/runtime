@@ -101,14 +101,14 @@ namespace System.Threading
                 while (true)
                 {
 #if NATIVEAOT && TARGET_UNIX
-                    if (ForkThreadServices.IsPreparing)
+                    if (ForkThreadServices.AreWorkersRetiring)
                     {
                         return;
                     }
 #endif
                     RunGateThreadEvent.WaitOne();
 #if NATIVEAOT && TARGET_UNIX
-                    if (ForkThreadServices.IsPreparing)
+                    if (ForkThreadServices.AreWorkersRetiring)
                     {
                         return;
                     }
@@ -120,7 +120,7 @@ namespace System.Threading
                     {
                         bool wasSignaledToWake = DelayEvent.WaitOne((int)delayHelper.GetNextDelay(currentTimeMs));
 #if NATIVEAOT && TARGET_UNIX
-                        if (ForkThreadServices.IsPreparing)
+                        if (ForkThreadServices.AreWorkersRetiring)
                         {
                             return;
                         }

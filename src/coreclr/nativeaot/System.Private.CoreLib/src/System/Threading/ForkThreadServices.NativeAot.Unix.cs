@@ -49,6 +49,22 @@ namespace System.Threading
         internal static bool IsPreparing => Volatile.Read(ref s_preparing) != 0;
 
         /// <summary>
+        /// Gets whether workers must stop dispatching after active callbacks have finished.
+        /// </summary>
+        internal static bool AreWorkersRetiring => IsPreparing && RuntimeImports.RhIsForkWorkRetired() != 0;
+
+        /// <summary>
+        /// Registers callbacks before application initialization or finalization can start services.
+        /// </summary>
+        internal static void Initialize()
+        {
+            lock (s_activationLock)
+            {
+                EnsureRegistered();
+            }
+        }
+
+        /// <summary>
         /// Records the initialized pool and registers callbacks without recreating that pool.
         /// </summary>
         /// <param name="pool">The initialized singleton.</param>
@@ -99,7 +115,7 @@ namespace System.Threading
         internal static bool TryEnterActivation()
         {
             s_activationLock.Enter();
-            if (IsPreparing)
+            if (AreWorkersRetiring)
             {
                 s_activationLock.Exit();
                 return false;
@@ -174,6 +190,22 @@ namespace System.Threading
                     }
 
                     Volatile.Write(ref s_preparing, 1);
+                }
+
+                long deadline = Environment.TickCount64 + 5000;
+                RuntimeImports.RhRequestForkWorkRetirement();
+                while (!AreWorkersRetiring)
+                {
+                    if (Environment.TickCount64 >= deadline)
+                    {
+                        return 12;
+                    }
+
+                    Thread.Sleep(1);
+                }
+
+                lock (s_activationLock)
+                {
                     threads = s_threads.ToArray();
                 }
 
@@ -187,7 +219,6 @@ namespace System.Threading
                     return 2;
                 }
 
-                long deadline = Environment.TickCount64 + 5000;
                 foreach (Thread thread in threads)
                 {
                     int remaining = (int)Math.Max(0, deadline - Environment.TickCount64);
@@ -269,6 +300,7 @@ namespace System.Threading
                         return 10;
                     }
 
+                    RuntimeImports.RhResumeForkWork();
                     Volatile.Write(ref s_preparing, 0);
                 }
 

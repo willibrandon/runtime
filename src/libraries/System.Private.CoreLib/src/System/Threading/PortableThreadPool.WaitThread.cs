@@ -212,7 +212,7 @@ namespace System.Threading
             {
 #if NATIVEAOT && TARGET_UNIX
                 ThreadPoolInstance._waitThreadLock.VerifyIsLocked();
-                if (!_stoppedForFork || ForkThreadServices.IsPreparing)
+                if (!_stoppedForFork || ForkThreadServices.AreWorkersRetiring)
                 {
                     return;
                 }
@@ -290,7 +290,7 @@ namespace System.Threading
                 while (true)
                 {
 #if NATIVEAOT && TARGET_UNIX
-                    if (ForkThreadServices.IsPreparing)
+                    if (ForkThreadServices.AreWorkersRetiring)
                     {
                         return;
                     }

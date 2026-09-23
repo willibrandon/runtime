@@ -24,7 +24,7 @@ public static unsafe class RetainedServicesProbe
     private const int WaitMode = 3;
 
     /// <summary>
-    /// Identifies unregister requests made after native wait threads exit during preparation.
+    /// Identifies unregister requests made during native fork preparation.
     /// </summary>
     private const int WaitRetirementMode = 4;
 
@@ -34,9 +34,19 @@ public static unsafe class RetainedServicesProbe
     private const int QueuedWaitMode = 5;
 
     /// <summary>
-    /// Identifies finalizer-driven blocking unregister after native wait-thread retirement.
+    /// Identifies finalizer-driven blocking unregister during native fork preparation.
     /// </summary>
     private const int FinalizerWaitMode = 6;
+
+    /// <summary>
+    /// Identifies a pool worker waiting for a queued callback during preparation.
+    /// </summary>
+    private const int BlockingWorkerMode = 7;
+
+    /// <summary>
+    /// Identifies a finalizer waiting for a queued callback during preparation.
+    /// </summary>
+    private const int BlockingFinalizerMode = 8;
 
     /// <summary>
     /// Counts the items enqueued from the native caller's managed setup frame.
@@ -114,6 +124,7 @@ public static unsafe class RetainedServicesProbe
                 WaitRetirementMode => RegisteredWaitProbe.Prepare(token, control, RegisteredWaitProbe.RetirementCaller.Worker),
                 QueuedWaitMode => QueuedWaitProbe.Prepare(token, control),
                 FinalizerWaitMode => RegisteredWaitProbe.Prepare(token, control, RegisteredWaitProbe.RetirementCaller.Finalizer),
+                BlockingWorkerMode or BlockingFinalizerMode => BlockingWaitProbe.Prepare(mode == BlockingFinalizerMode, control),
                 _ => 102,
             };
 
@@ -154,6 +165,7 @@ public static unsafe class RetainedServicesProbe
                 QueueMode => CheckQueue(nativePid != parentPid, report),
                 WaitMode or WaitRetirementMode or FinalizerWaitMode => RegisteredWaitProbe.Check(nativePid, parentPid, report),
                 QueuedWaitMode => QueuedWaitProbe.Check(nativePid, parentPid, report),
+                BlockingWorkerMode or BlockingFinalizerMode => BlockingWaitProbe.Check(nativePid, report),
                 _ => 102,
             };
         }

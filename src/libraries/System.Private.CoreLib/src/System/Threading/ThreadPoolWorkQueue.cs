@@ -1035,31 +1035,6 @@ namespace System.Threading
             //
             while (true)
             {
-#if NATIVEAOT && TARGET_UNIX
-                if (ForkThreadServices.IsPreparing)
-                {
-                    if (workItem != null)
-                    {
-                        if (tl.isProcessingHighPriorityWorkItems)
-                        {
-                            workQueue.EnqueueAtHighPriority(workItem);
-                        }
-                        else
-                        {
-                            workQueue.Enqueue(workItem, forceGlobal: true);
-                        }
-                    }
-
-                    tl.TransferLocalWork();
-                    tl.isProcessingHighPriorityWorkItems = false;
-                    if (s_assignableWorkItemQueueCount > 0)
-                    {
-                        workQueue.UnassignWorkItemQueue(tl);
-                    }
-
-                    return true;
-                }
-#endif
                 if (workItem == null)
                 {
                     missedSteal = false;
@@ -1088,6 +1063,31 @@ namespace System.Threading
                     }
                 }
 
+#if NATIVEAOT && TARGET_UNIX
+                if (System.Runtime.RuntimeImports.RhTryEnterForkWork() == 0)
+                {
+                    if (workItem != null)
+                    {
+                        if (tl.isProcessingHighPriorityWorkItems)
+                        {
+                            workQueue.EnqueueAtHighPriority(workItem);
+                        }
+                        else
+                        {
+                            workQueue.Enqueue(workItem, forceGlobal: true);
+                        }
+                    }
+
+                    tl.TransferLocalWork();
+                    tl.isProcessingHighPriorityWorkItems = false;
+                    if (s_assignableWorkItemQueueCount > 0)
+                    {
+                        workQueue.UnassignWorkItemQueue(tl);
+                    }
+
+                    return true;
+                }
+#endif
                 if (workQueue._loggingEnabled && FrameworkEventSource.Log.IsEnabled())
                 {
                     FrameworkEventSource.Log.ThreadPoolDequeueWorkObject(workItem);
@@ -1123,6 +1123,9 @@ namespace System.Threading
 
                 // Reset thread state after all user code for the work item has completed
                 currentThread.ResetThreadPoolThread();
+#if NATIVEAOT && TARGET_UNIX
+                System.Runtime.RuntimeImports.RhExitForkWork();
+#endif
 
                 //
                 // Notify the VM that we executed this workitem.  This is also our opportunity to ask whether Hill Climbing wants

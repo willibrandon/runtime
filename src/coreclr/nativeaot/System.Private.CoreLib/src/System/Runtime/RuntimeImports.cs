@@ -41,6 +41,41 @@ namespace System.Runtime
             delegate* unmanaged[Cdecl]<int> parent,
             delegate* unmanaged[Cdecl]<int> childReset,
             delegate* unmanaged[Cdecl]<int> childResume);
+
+        /// <summary>
+        /// Admits one callback unless retirement has atomically closed dispatch.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhTryEnterForkWork")]
+        internal static extern int RhTryEnterForkWork();
+
+        /// <summary>
+        /// Completes callback execution and its execution-context cleanup.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhExitForkWork")]
+        internal static extern void RhExitForkWork();
+
+        /// <summary>
+        /// Closes callback admission when the last active callback finishes.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhRequestForkWorkRetirement")]
+        internal static extern void RhRequestForkWorkRetirement();
+
+        /// <summary>
+        /// Gets whether callback admission has closed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhIsForkWorkRetired")]
+        internal static extern int RhIsForkWorkRetired();
+
+        /// <summary>
+        /// Reopens callback admission after native recovery.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhResumeForkWork")]
+        internal static extern void RhResumeForkWork();
 #endif
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]

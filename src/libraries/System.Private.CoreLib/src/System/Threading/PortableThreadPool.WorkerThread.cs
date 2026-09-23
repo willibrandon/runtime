@@ -157,7 +157,7 @@ namespace System.Threading
                 while (true)
                 {
 #if NATIVEAOT && TARGET_UNIX
-                    if (ForkThreadServices.IsPreparing)
+                    if (ForkThreadServices.AreWorkersRetiring)
                     {
                         return;
                     }
@@ -166,7 +166,7 @@ namespace System.Threading
                     while (semaphore.Wait(timeoutMs, spinWait))
                     {
 #if NATIVEAOT && TARGET_UNIX
-                        if (ForkThreadServices.IsPreparing)
+                        if (ForkThreadServices.AreWorkersRetiring)
                         {
                             return;
                         }

@@ -20,4 +20,9 @@
     <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
     <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
   </ItemGroup>
+  <ItemGroup Condition="'$(ForkWorkProtocol)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkWorkState" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkWorkState" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkWorkState" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+  </ItemGroup>
 </Project>
