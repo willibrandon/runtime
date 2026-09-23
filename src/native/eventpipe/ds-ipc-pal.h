@@ -90,6 +90,10 @@ uint64_t ds_ipc_stream_response_remaining (DiagnosticsIpcStream *stream);
 // Discards queued bytes and optionally releases the stream. A tracing session
 // retains its stream after the listener has delivered the start response.
 void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream, bool release_stream);
+// Reserves allocation-free storage for trace bytes interrupted by a checkpoint.
+bool ds_ipc_stream_prepare_fork_output (DiagnosticsIpcStream *stream);
+// Makes trace writes and stream polling interruptible by the listener checkpoint.
+void ds_ipc_stream_set_fork_interrupt (DiagnosticsIpcStream *stream, int interrupt_fd);
 #endif
 
 // puts the DiagnosticsIpc into Listening Mode

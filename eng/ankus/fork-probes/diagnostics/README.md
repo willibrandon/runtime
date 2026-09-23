@@ -15,21 +15,22 @@ From the runtime root, after building Native AOT Release:
 
 ```sh
 mkdir -p eng/ankus/fork-probes/diagnostics/obj
-c++ -std=c++17 -O2 -fPIC -Wall -Wextra -Werror \
-  -DFEATURE_NATIVEAOT -DFEATURE_PERFTRACING -DEP_NO_RT_DEPENDENCY \
-  -Isrc/native \
-  -Iartifacts/obj/coreclr/linux.x64.Release/nativeaot/Runtime/eventpipe/inc \
-  -c eng/ankus/fork-probes/diagnostics/bridge.cpp \
-  -o eng/ankus/fork-probes/diagnostics/obj/diagnostics-bridge.o
+python3 eng/ankus/fork-probes/diagnostics/build-ownership.py \
+  --compile-commands artifacts/obj/coreclr/linux.x64.Release/compile_commands.json \
+  --source bridge.cpp --output obj/diagnostics-bridge.o
+python3 eng/ankus/fork-probes/diagnostics/build-ownership.py \
+  --compile-commands artifacts/obj/coreclr/linux.x64.Release/compile_commands.json
 cd eng/ankus/fork-probes/diagnostics
 cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -o host
-dotnet publish -c Release -r linux-x64 -o publish -p:IlcSdkPath="$ANKUS_AOT_SDK/"
+dotnet publish -c Release -r linux-x64 -o publish -p:IlcSdkPath="$ANKUS_AOT_SDK/" \
+  -p:ProbeAllocationFailures=true
 python3 run.py --host ./host --library publish/NativeDiagnosticsProbe.so --output results
 python3 io.py --host ./host --library publish/NativeDiagnosticsProbe.so --output io-results
 python3 connect.py --host ./host --library publish/NativeDiagnosticsProbe.so --output connect-results
 python3 reverse.py --host ./host --library publish/NativeDiagnosticsProbe.so --output reverse-results
 python3 listener.py --host ./host --library publish/NativeDiagnosticsProbe.so --output listener-results
 python3 response.py --host ./host --library publish/NativeDiagnosticsProbe.so --output response-results
+python3 tracing.py --host ./host --library publish/NativeDiagnosticsProbe.so --output tracing-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
@@ -87,5 +88,7 @@ fork without managed child calls; listener tests stop and restart without forkin
 Command and tracing responses now preserve queued output. Linux UserEvents
 descriptor receipt can also stop and resume with the listener. A tracing session
 starts only after its complete success response is delivered. Active tracing and
-sampling threads now stop and restart without ending their sessions. Blocked trace
-output, child recovery and multiple runtime instances still need coverage.
+sampling threads stop and restart without ending their sessions. Blocked and
+partially sent trace output survives repeated checkpoints, and the saved trace
+must open with `dotnet-trace report`. Child recovery and multiple runtime instances
+still need coverage.

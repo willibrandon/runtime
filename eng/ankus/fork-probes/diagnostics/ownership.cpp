@@ -15,7 +15,9 @@ static thread_local int fail_index;
 static thread_local uint64_t allocations;
 static thread_local uint64_t failures;
 static thread_local uint64_t failure_offset;
-static std::atomic<bool> block_sends;
+static std::atomic<int64_t> send_allowance{-1};
+static std::atomic<uint64_t> blocked_send_attempts;
+static std::atomic<uint64_t> constrained_send_bytes;
 
 static bool fail_allocation(void* return_address)
 {
@@ -60,13 +62,28 @@ extern "C" void* __wrap_realloc(void* memory, size_t size) noexcept
 
 extern "C" ssize_t __wrap_send(int socket, const void* buffer, size_t length, int flags) noexcept
 {
-    if (block_sends.load())
+    int64_t allowance = send_allowance.load();
+    if (allowance == 0)
     {
+        blocked_send_attempts.fetch_add(1);
         errno = EAGAIN;
         return -1;
     }
 
-    return __real_send(socket, buffer, length, flags);
+    size_t permitted = length;
+    if (allowance > 0 && static_cast<uint64_t>(allowance) < permitted)
+    {
+        permitted = static_cast<size_t>(allowance);
+    }
+
+    ssize_t result = __real_send(socket, buffer, permitted, flags);
+    if (result > 0 && allowance > 0)
+    {
+        send_allowance.fetch_sub(result);
+        constrained_send_bytes.fetch_add(static_cast<uint64_t>(result));
+    }
+
+    return result;
 }
 
 extern "C" char* __wrap_strdup(const char* value) noexcept
@@ -91,8 +108,33 @@ extern "C" void* __wrap_calloc(size_t count, size_t size) noexcept
 
 extern "C" __attribute__((visibility("default"))) int ankus_probe_block_sends(int block)
 {
-    block_sends.store(block != 0);
-    return block_sends.load() ? 1 : 0;
+    blocked_send_attempts.store(0);
+    constrained_send_bytes.store(0);
+    send_allowance.store(block != 0 ? 0 : -1);
+    return send_allowance.load() == 0 ? 1 : 0;
+}
+
+extern "C" __attribute__((visibility("default"))) uint64_t ankus_probe_blocked_send_attempts()
+{
+    return blocked_send_attempts.load();
+}
+
+extern "C" __attribute__((visibility("default"))) int64_t ankus_probe_limit_sends(int64_t bytes)
+{
+    if (bytes < 0)
+    {
+        return -2;
+    }
+
+    blocked_send_attempts.store(0);
+    constrained_send_bytes.store(0);
+    send_allowance.store(bytes);
+    return send_allowance.load();
+}
+
+extern "C" __attribute__((visibility("default"))) uint64_t ankus_probe_constrained_send_bytes()
+{
+    return constrained_send_bytes.load();
 }
 
 struct ObservedWriter

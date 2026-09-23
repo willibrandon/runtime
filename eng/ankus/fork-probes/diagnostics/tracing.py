@@ -22,8 +22,9 @@ from run import HEADER, MAGIC, process_info, receive
 CASES = [f"collect-{version}-malformed" for version in range(1, 6)] + [
     "stop-empty", "stop-short", "stop-long", "stop-unknown", "descriptor-eof",
     "descriptor-extra", "descriptor-invalid", "descriptor-pause", "start-response-pause",
-    "active-writer-pause", "active-sampling-pause", "session-lifetime", "session-capacity",
-    "allocation-file", "allocation-serializer", "allocation-session"]
+    "active-writer-pause", "active-sampling-pause", "active-blocked-writer-pause",
+    "session-lifetime", "session-capacity", "allocation-file", "allocation-serializer",
+    "allocation-session"]
 BAD_ENCODING = 0x80131384
 FAIL = 0x80004005
 
@@ -77,7 +78,7 @@ def drain_trace(peer):
         assert len(data) < 1_000_000
     assert data.startswith(b"Nettrace"), data[:32]
     assert data.endswith(b"\x01"), "trace did not end with its serialization terminator"
-    return len(data)
+    return bytes(data)
 
 
 def probe_environment(directory):
@@ -133,6 +134,27 @@ def set_send_blocked(process, blocked):
     assert command(process, f"w {expected}") == f"send-blocked {expected}"
 
 
+def set_send_limit(process, byte_count):
+    """Allow an exact number of bytes before fixture-controlled sends block."""
+    assert command(process, f"y {byte_count}") == f"send-limit {byte_count}"
+
+
+def wait_blocked_send(process):
+    """Wait until the trace writer has reached the fixture-controlled send boundary."""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        response = command(process, "x")
+        assert response.startswith("blocked-sends "), response
+        fields = response.split()
+        assert fields[2] == "constrained-bytes", response
+        attempts = int(fields[1])
+        constrained_bytes = int(fields[3])
+        if attempts > 0:
+            return attempts, constrained_bytes
+        time.sleep(0.002)
+    raise AssertionError("trace writer did not reach the blocked send boundary")
+
+
 def process_threads(process):
     """Return every live task and its kernel-visible name."""
     tasks = {}
@@ -179,9 +201,9 @@ def run_active_worker_pause(process, endpoint, evidence, sampling):
                     assert command(process, "g 10") == "managed-work 0"
 
             stop(endpoint, session_id)
-            bytes_received = reader.result(timeout=4)
+            trace = reader.result(timeout=4)
             if sampling:
-                assert bytes_received > 738, "sampling thread produced no trace events"
+                assert len(trace) > 738, "sampling thread produced no trace events"
 
             evidence["requests"].append({
                 "session": session_id,
@@ -189,7 +211,61 @@ def run_active_worker_pause(process, endpoint, evidence, sampling):
                 "threads_baseline": baseline,
                 "threads_before": before,
                 "cycles": cycles,
-                "bytes": bytes_received,
+                "bytes": len(trace),
+            })
+
+
+def run_blocked_writer_pause(process, endpoint, evidence):
+    """Preserve in-flight trace bytes when a fork checkpoint interrupts socket output."""
+    baseline = process_threads(process)
+    with connect(endpoint) as peer:
+        request(peer, 6, collect_body(sampling=True))
+        session_id = session_reply(peer)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as readers:
+            reader = readers.submit(drain_trace, peer)
+            expected = len(baseline) + 2
+            before = wait_process_threads(process, expected)
+            set_send_limit(process, 32)
+            assert command(process, "g 250") == "managed-work 0"
+            attempts, constrained_bytes = wait_blocked_send(process)
+            assert constrained_bytes == 32
+            assert command(process, "f 1") == "fork-checkpoint 1"
+            paused = wait_process_threads(process, len(baseline) - 1)
+            cycles = []
+            for index in range(5):
+                assert command(process, "f 0") == "fork-checkpoint 1"
+                resumed = wait_process_threads(process, expected)
+                set_send_limit(process, 0)
+                cycle_attempts, cycle_bytes = wait_blocked_send(process)
+                assert cycle_bytes == 0
+                assert command(process, "f 1") == "fork-checkpoint 1"
+                cycle_paused = wait_process_threads(process, len(baseline) - 1)
+                cycles.append({
+                    "index": index,
+                    "blocked_send_attempts": cycle_attempts,
+                    "resumed": resumed,
+                    "paused": cycle_paused,
+                })
+
+            set_send_blocked(process, False)
+            assert command(process, "f 0") == "fork-checkpoint 1"
+            after = wait_process_threads(process, expected)
+            assert command(process, "g 50") == "managed-work 0"
+            stop(endpoint, session_id)
+            trace = reader.result(timeout=4)
+            assert len(trace) > 738
+            trace_path = evidence["trace_path"]
+            trace_path.write_bytes(trace)
+            evidence["requests"].append({
+                "session": session_id,
+                "blocked_send_attempts": attempts,
+                "constrained_send_bytes": constrained_bytes,
+                "threads_baseline": baseline,
+                "threads_before": before,
+                "threads_paused": paused,
+                "threads_after": after,
+                "blocked_replay_cycles": cycles,
+                "bytes": len(trace),
             })
 
 
@@ -247,7 +323,8 @@ def run_start_response_pause(process, endpoint, evidence):
                 session_id = session_reply(peer)
                 reader = readers.submit(drain_trace, peer)
                 stop(endpoint, session_id)
-                evidence["requests"].append({"session": session_id, "bytes": reader.result(timeout=4)})
+                trace = reader.result(timeout=4)
+                evidence["requests"].append({"session": session_id, "bytes": len(trace)})
         finally:
             if blocked and process.poll() is None:
                 set_send_blocked(process, False)
@@ -331,6 +408,8 @@ def run_allocation_case(args, case):
 def run_case(args, case):
     """Check each request's response, cleanup, and subsequent process query."""
     evidence = {"case": case, "checkpoints": [], "requests": []}
+    if case == "active-blocked-writer-pause":
+        evidence["trace_path"] = args.output / f"{case}.nettrace"
     with tempfile.TemporaryDirectory(prefix="diag-tracing-", dir="/tmp") as directory:
         with (args.output / f"{case}.stderr.log").open("w") as stderr:
             process = subprocess.Popen([str(args.host.resolve()), str(args.library.resolve())],
@@ -353,6 +432,8 @@ def run_case(args, case):
                     run_active_worker_pause(process, endpoint, evidence, False)
                 elif case == "active-sampling-pause":
                     run_active_worker_pause(process, endpoint, evidence, True)
+                elif case == "active-blocked-writer-pause":
+                    run_blocked_writer_pause(process, endpoint, evidence)
                 elif case.startswith("session-"):
                     count = 64 if case == "session-capacity" else 1
                     rounds = 1 if count == 64 else 20
@@ -377,7 +458,8 @@ def run_case(args, case):
                                         status_response(peer, FAIL)
                                 for session_id, reader in sessions:
                                     stop(endpoint, session_id)
-                                    evidence["requests"].append({"session": session_id, "bytes": reader.result(timeout=4)})
+                                    trace = reader.result(timeout=4)
+                                    evidence["requests"].append({"session": session_id, "bytes": len(trace)})
                         finally:
                             for peer in peers:
                                 peer.close()
@@ -424,7 +506,11 @@ def run_case(args, case):
                         os.killpg(process.pid, signal.SIGKILL)
                         process.communicate(timeout=5)
                 evidence["exit"] = process.returncode
-                (args.output / f"{case}.json").write_text(json.dumps(evidence, indent=2) + "\n")
+                serializable_evidence = dict(evidence)
+                if "trace_path" in serializable_evidence:
+                    serializable_evidence["trace_path"] = str(serializable_evidence["trace_path"])
+                (args.output / f"{case}.json").write_text(
+                    json.dumps(serializable_evidence, indent=2) + "\n")
             assert process.returncode == 0
             assert (args.output / f"{case}.stderr.log").stat().st_size == 0
     print(f"tracing {case} passed", flush=True)

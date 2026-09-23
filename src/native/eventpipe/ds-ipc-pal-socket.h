@@ -74,6 +74,11 @@ struct _DiagnosticsIpcStream_Internal {
 	uint64_t response_remaining;
 	bool response_buffered;
 	bool response_failed;
+	// Trace output interrupted by a fork checkpoint is kept in an anonymous file.
+	void *fork_output_file;
+	uint64_t fork_output_length;
+	uint64_t fork_output_sent;
+	int fork_interrupt_fd;
 #endif
 };
 

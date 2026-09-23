@@ -111,7 +111,14 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 	ep_rt_volatile_store_uint32_t (&session->started, 1);
 
 	EP_GCX_PREEMP_ENTER
-		if (ep_session_type_uses_buffer_manager (session->session_type)) {
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		if (session->fork_streaming_resuming) {
+			EP_ASSERT (session->session_type == EP_SESSION_TYPE_IPCSTREAM && session->stream != NULL);
+			success = ep_ipc_stream_flush_vcall (session->stream);
+			session->fork_streaming_resuming = false;
+		}
+#endif
+		if (success && ep_session_type_uses_buffer_manager (session->session_type)) {
 			ep_rt_wait_event_handle_t *wait_event = ep_session_get_wait_event (session);
 			while (ep_session_get_streaming_enabled (session)) {
 				bool events_written = false;
@@ -129,7 +136,7 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 				const uint32_t timeout_ns = 100000000; // 100 msec.
 				ep_rt_thread_sleep (timeout_ns);
 			}
-		} else if (session->session_type == EP_SESSION_TYPE_USEREVENTS) {
+		} else if (success && session->session_type == EP_SESSION_TYPE_USEREVENTS) {
 			// In a user events session we only monitor the stream to stop the session if it closes.
 			while (ep_session_get_streaming_enabled (session)) {
 				EP_ASSERT (session->stream != NULL);
@@ -142,7 +149,7 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 				const uint32_t timeout_ns = 100000000; // 100 msec.
 				ep_rt_thread_sleep (timeout_ns);
 			}
-		} else {
+		} else if (success) {
 			EP_UNREACHABLE ("Unsupported session type for streaming thread.");
 		}
 		session->streaming_thread = NULL;
@@ -679,6 +686,7 @@ ep_session_resume_streaming_after_fork (EventPipeSession *session)
 		return;
 
 	EP_ASSERT (!ep_session_get_streaming_enabled (session));
+	session->fork_streaming_resuming = session->session_type == EP_SESSION_TYPE_IPCSTREAM;
 	session->fork_streaming_paused = false;
 	session_create_streaming_thread (session);
 }

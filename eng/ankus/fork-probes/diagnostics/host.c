@@ -25,6 +25,9 @@ typedef int (*eventpipe_checkpoint_fn)(bool);
 typedef int32_t (*managed_work_fn)(int32_t);
 typedef int (*trace_ownership_fn)(int, int, uint64_t*);
 typedef int (*block_sends_fn)(int);
+typedef uint64_t (*blocked_send_attempts_fn)(void);
+typedef int64_t (*limit_sends_fn)(int64_t);
+typedef uint64_t (*constrained_send_bytes_fn)(void);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -88,6 +91,11 @@ main(int argc, char **argv)
 
     trace_ownership_fn trace_ownership = (trace_ownership_fn) dlsym(library, "ankus_probe_trace_ownership");
     block_sends_fn block_sends = (block_sends_fn) dlsym(library, "ankus_probe_block_sends");
+    blocked_send_attempts_fn blocked_send_attempts =
+        (blocked_send_attempts_fn) dlsym(library, "ankus_probe_blocked_send_attempts");
+    limit_sends_fn limit_sends = (limit_sends_fn) dlsym(library, "ankus_probe_limit_sends");
+    constrained_send_bytes_fn constrained_send_bytes =
+        (constrained_send_bytes_fn) dlsym(library, "ankus_probe_constrained_send_bytes");
 
     printf("ready %d\n", (int) getpid());
     fflush(stdout);
@@ -231,6 +239,27 @@ main(int argc, char **argv)
             }
 
             printf("send-blocked %d\n", block_sends(block));
+        }
+        else if (command[0] == 'x')
+        {
+            if (blocked_send_attempts == NULL || constrained_send_bytes == NULL)
+            {
+                return 76;
+            }
+
+            printf("blocked-sends %llu constrained-bytes %llu\n",
+                   (unsigned long long) blocked_send_attempts(),
+                   (unsigned long long) constrained_send_bytes());
+        }
+        else if (command[0] == 'y')
+        {
+            long long bytes;
+            if (limit_sends == NULL || sscanf(command + 1, "%lld", &bytes) != 1 || bytes < 0)
+            {
+                return 77;
+            }
+
+            printf("send-limit %lld\n", (long long) limit_sends((int64_t) bytes));
         }
         else if (command[0] == 'i')
         {

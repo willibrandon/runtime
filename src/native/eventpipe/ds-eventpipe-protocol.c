@@ -954,6 +954,15 @@ eventpipe_protocol_helper_collect_tracing (
 		}
 	}
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	if (payload->session_type == EP_SESSION_TYPE_IPCSTREAM &&
+		!ds_ipc_stream_prepare_fork_output (stream)) {
+		ds_ipc_message_send_error (stream, DS_IPC_E_FAIL);
+		ds_ipc_stream_free (stream);
+		return 0;
+	}
+#endif
+
 	EventPipeSessionOptions options;
 	ep_session_options_init(
 		&options,

@@ -78,6 +78,8 @@ struct _EventPipeSession_Internal {
 #ifdef DS_NATIVEAOT_FORK_LISTENER
 	// The fork checkpoint stopped this session's writer without disabling the session.
 	bool fork_streaming_paused;
+	// The replacement IPC writer must deliver output retained at the checkpoint.
+	bool fork_streaming_resuming;
 #endif
 };
 

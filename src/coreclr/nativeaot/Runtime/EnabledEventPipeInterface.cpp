@@ -39,7 +39,7 @@ bool EventPipe_PrepareForFork()
 bool EventPipe_ResumeParentAfterFork()
 {
 #ifdef DS_NATIVEAOT_FORK_LISTENER
-    return ep_resume_after_fork() && ds_server_resume_listener();
+    return ds_server_resume_listener() && ep_resume_after_fork();
 #else
     return false;
 #endif

@@ -209,6 +209,7 @@ static size_t server_loop_tick (void* data) {
 		if (stream == NULL)
 			return ep_rt_volatile_load_uint32_t (&_server_pausing) != 0 ? 1 : 0;
 
+		ds_ipc_stream_set_fork_interrupt (stream, _server_interrupt [0]);
 		ds_rt_auto_trace_signal ();
 		ds_ipc_message_init (message);
 		_server_pending_stream = stream;
