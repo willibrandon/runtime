@@ -506,9 +506,9 @@ namespace System.Threading
             _waitThreadLock.Acquire();
             try
             {
-                if (_waitThreadsHead != null)
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
                 {
-                    return false;
+                    current.Thread.RequestForkRetirement();
                 }
             }
             finally
@@ -527,6 +527,22 @@ namespace System.Threading
         /// <returns>Whether all semaphore waiters and queue assignments retired normally.</returns>
         internal bool CompleteForkRetirement()
         {
+            _waitThreadLock.Acquire();
+            try
+            {
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
+                {
+                    if (!current.Thread.IsRetiredForFork)
+                    {
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                _waitThreadLock.Release();
+            }
+
             if (!WorkerThread.CompleteForkRetirement() || !ThreadPool.s_workQueue.CompleteForkRetirement())
             {
                 return false;
@@ -556,6 +572,18 @@ namespace System.Threading
         {
             _separated.lastDequeueTime = Environment.TickCount;
             ThreadPool.s_workQueue.ResumeAfterFork();
+            _waitThreadLock.Acquire();
+            try
+            {
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
+                {
+                    current.Thread.ResumeAfterFork();
+                }
+            }
+            finally
+            {
+                _waitThreadLock.Release();
+            }
         }
 #endif
 

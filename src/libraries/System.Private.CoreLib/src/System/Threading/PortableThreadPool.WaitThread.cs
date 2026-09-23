@@ -175,11 +175,48 @@ namespace System.Threading
             /// </summary>
             private readonly AutoResetEvent _changeHandlesEvent = new AutoResetEvent(false);
 
+#if NATIVEAOT && TARGET_UNIX
+            /// <summary>
+            /// Records that no thread can access the wait arrays outside the pool lock.
+            /// </summary>
+            private bool _stoppedForFork = true;
+
+            /// <summary>
+            /// Gets whether ordinary removal and wait cleanup have completed.
+            /// </summary>
+            internal bool IsRetiredForFork => _stoppedForFork && _numPendingRemoves == 0;
+
+            /// <summary>
+            /// Interrupts the current wait so its thread can finish without consuming another user signal.
+            /// </summary>
+            internal void RequestForkRetirement() => _changeHandlesEvent.Set();
+
+            /// <summary>
+            /// Restarts waiting on the same registrations and absolute timeout deadlines.
+            /// </summary>
+            internal void ResumeAfterFork() => StartThread();
+#endif
+
             internal bool AnyUserWaits => _numUserWaits != 0;
 
             public WaitThread()
             {
                 _waitHandles[0] = _changeHandlesEvent.SafeWaitHandle;
+                StartThread();
+            }
+
+            /// <summary>
+            /// Starts a wait thread while its registration arrays are protected by the pool lock.
+            /// </summary>
+            private void StartThread()
+            {
+#if NATIVEAOT && TARGET_UNIX
+                ThreadPoolInstance._waitThreadLock.VerifyIsLocked();
+                if (!_stoppedForFork || ForkThreadServices.IsPreparing)
+                {
+                    return;
+                }
+#endif
 
                 // Thread pool threads must start in the default execution context without transferring the context, so
                 // using UnsafeStart() instead of Start()
@@ -189,7 +226,23 @@ namespace System.Threading
                     IsBackground = true,
                     Name = ".NET TP Wait"
                 };
+#if NATIVEAOT && TARGET_UNIX
+                _stoppedForFork = false;
+                try
+                {
+                    if (!ForkThreadServices.StartThread(waitThread))
+                    {
+                        _stoppedForFork = true;
+                    }
+                }
+                catch
+                {
+                    _stoppedForFork = true;
+                    throw;
+                }
+#else
                 waitThread.UnsafeStart();
+#endif
             }
 
             /// <summary>
@@ -197,8 +250,51 @@ namespace System.Threading
             /// </summary>
             private void WaitThreadStart()
             {
+#if NATIVEAOT && TARGET_UNIX
+                try
+                {
+                    WaitThreadLoop();
+                }
+                finally
+                {
+                    try
+                    {
+                        ThreadPoolInstance._waitThreadLock.Acquire();
+                        try
+                        {
+                            // All WaitAny registrations have unwound. Remove late unregister
+                            // requests before publishing stopped state to another caller.
+                            _stoppedForFork = true;
+                            ProcessRemovalsUnderLock();
+                        }
+                        finally
+                        {
+                            ThreadPoolInstance._waitThreadLock.Release();
+                        }
+                    }
+                    finally
+                    {
+                        ForkThreadServices.OnThreadExit();
+                    }
+                }
+#else
+                WaitThreadLoop();
+#endif
+            }
+
+            /// <summary>
+            /// Waits for user signals and deadlines until idle expiry or fork retirement.
+            /// </summary>
+            private void WaitThreadLoop()
+            {
                 while (true)
                 {
+#if NATIVEAOT && TARGET_UNIX
+                    if (ForkThreadServices.IsPreparing)
+                    {
+                        return;
+                    }
+#endif
                     // This value is taken inside the lock after processing removals. In this iteration these are the number of
                     // user waits that will be waited upon. Any new waits will wake the wait and the next iteration would
                     // consider them.
@@ -292,73 +388,86 @@ namespace System.Threading
                 threadPoolInstance._waitThreadLock.Acquire();
                 try
                 {
-                    Debug.Assert(_numPendingRemoves >= 0);
-                    Debug.Assert(_numPendingRemoves <= _pendingRemoves.Length);
-                    Debug.Assert(_numUserWaits >= 0);
-                    Debug.Assert(_numUserWaits <= _registeredWaits.Length);
-                    Debug.Assert(_numPendingRemoves <= _numUserWaits, $"Num removals {_numPendingRemoves} should be less than or equal to num user waits {_numUserWaits}");
-
-                    if (_numPendingRemoves == 0 || _numUserWaits == 0)
-                    {
-                        return _numUserWaits; // return the value taken inside the lock for the caller
-                    }
-                    int originalNumUserWaits = _numUserWaits;
-                    int originalNumPendingRemoves = _numPendingRemoves;
-
-                    // This is O(N^2), but max(N) = 63 and N will usually be very low
-                    for (int i = 0; i < _numPendingRemoves; i++)
-                    {
-                        RegisteredWaitHandle waitHandleToRemove = _pendingRemoves[i]!;
-                        int numUserWaits = _numUserWaits;
-                        int j = 0;
-                        for (; j < numUserWaits && waitHandleToRemove != _registeredWaits[j]; j++)
-                        {
-                        }
-                        Debug.Assert(j < numUserWaits);
-
-                        waitHandleToRemove.OnRemoveWait();
-
-                        if (j + 1 < numUserWaits)
-                        {
-                            // Not removing the last element. Due to the possibility of there being duplicate system wait
-                            // objects in the wait array, perhaps even with different handle values due to the use of
-                            // DuplicateHandle(), don't reorder handles for fairness. When there are duplicate system wait
-                            // objects in the wait array and the wait object gets signaled, the system may release the wait in
-                            // in deterministic order based on the order in the wait array. Instead, shift the array.
-
-                            int removeAt = j;
-                            int count = numUserWaits;
-                            Array.Copy(_registeredWaits, removeAt + 1, _registeredWaits, removeAt, count - (removeAt + 1));
-                            _registeredWaits[count - 1] = null!;
-
-                            // Corresponding elements in the wait handles array are shifted up by one
-                            removeAt++;
-                            count++;
-                            Array.Copy(_waitHandles, removeAt + 1, _waitHandles, removeAt, count - (removeAt + 1));
-                            _waitHandles[count - 1] = null!;
-                        }
-                        else
-                        {
-                            // Removing the last element
-                            _registeredWaits[j] = null!;
-                            _waitHandles[j + 1] = null!;
-                        }
-
-                        _numUserWaits = numUserWaits - 1;
-                        _pendingRemoves[i] = null;
-
-                        waitHandleToRemove.Handle.DangerousRelease();
-                    }
-                    _numPendingRemoves = 0;
-
-                    Debug.Assert(originalNumUserWaits - originalNumPendingRemoves == _numUserWaits,
-                        $"{originalNumUserWaits} - {originalNumPendingRemoves} == {_numUserWaits}");
-                    return _numUserWaits; // return the value taken inside the lock for the caller
+                    return ProcessRemovalsUnderLock();
                 }
                 finally
                 {
                     threadPoolInstance._waitThreadLock.Release();
                 }
+            }
+
+            /// <summary>
+            /// Removes completed registrations while no other caller can change the wait arrays.
+            /// </summary>
+            /// <returns>The remaining number of registered user waits.</returns>
+            private int ProcessRemovalsUnderLock()
+            {
+                ThreadPoolInstance._waitThreadLock.VerifyIsLocked();
+                Debug.Assert(_numPendingRemoves >= 0);
+                Debug.Assert(_numPendingRemoves <= _pendingRemoves.Length);
+                Debug.Assert(_numUserWaits >= 0);
+                Debug.Assert(_numUserWaits <= _registeredWaits.Length);
+                Debug.Assert(_numPendingRemoves <= _numUserWaits, $"Num removals {_numPendingRemoves} should be less than or equal to num user waits {_numUserWaits}");
+
+                if (_numPendingRemoves == 0 || _numUserWaits == 0)
+                {
+                    return _numUserWaits; // return the value taken inside the lock for the caller
+                }
+
+                int originalNumUserWaits = _numUserWaits;
+                int originalNumPendingRemoves = _numPendingRemoves;
+
+                // This is O(N^2), but max(N) = 63 and N will usually be very low
+                for (int i = 0; i < _numPendingRemoves; i++)
+                {
+                    RegisteredWaitHandle waitHandleToRemove = _pendingRemoves[i]!;
+                    int numUserWaits = _numUserWaits;
+                    int j = 0;
+                    for (; j < numUserWaits && waitHandleToRemove != _registeredWaits[j]; j++)
+                    {
+                    }
+
+                    Debug.Assert(j < numUserWaits);
+
+                    waitHandleToRemove.OnRemoveWait();
+
+                    if (j + 1 < numUserWaits)
+                    {
+                        // Not removing the last element. Due to the possibility of there being duplicate system wait
+                        // objects in the wait array, perhaps even with different handle values due to the use of
+                        // DuplicateHandle(), don't reorder handles for fairness. When there are duplicate system wait
+                        // objects in the wait array and the wait object gets signaled, the system may release the wait in
+                        // in deterministic order based on the order in the wait array. Instead, shift the array.
+
+                        int removeAt = j;
+                        int count = numUserWaits;
+                        Array.Copy(_registeredWaits, removeAt + 1, _registeredWaits, removeAt, count - (removeAt + 1));
+                        _registeredWaits[count - 1] = null!;
+
+                        // Corresponding elements in the wait handles array are shifted up by one
+                        removeAt++;
+                        count++;
+                        Array.Copy(_waitHandles, removeAt + 1, _waitHandles, removeAt, count - (removeAt + 1));
+                        _waitHandles[count - 1] = null!;
+                    }
+                    else
+                    {
+                        // Removing the last element
+                        _registeredWaits[j] = null!;
+                        _waitHandles[j + 1] = null!;
+                    }
+
+                    _numUserWaits = numUserWaits - 1;
+                    _pendingRemoves[i] = null;
+
+                    waitHandleToRemove.Handle.DangerousRelease();
+                }
+
+                _numPendingRemoves = 0;
+
+                Debug.Assert(originalNumUserWaits - originalNumPendingRemoves == _numUserWaits,
+                    $"{originalNumUserWaits} - {originalNumPendingRemoves} == {_numUserWaits}");
+                return _numUserWaits; // return the value taken inside the lock for the caller
             }
 
             /// <summary>
@@ -400,6 +509,9 @@ namespace System.Threading
                     return false;
                 }
 
+#if NATIVEAOT && TARGET_UNIX
+                StartThread();
+#endif
                 bool success = false;
                 handle.Handle.DangerousAddRef(ref success);
                 Debug.Assert(success);
@@ -451,6 +563,14 @@ namespace System.Threading
                         }
 
                         pendingRemoval = true;
+#if NATIVEAOT && TARGET_UNIX
+                        if (_stoppedForFork)
+                        {
+                            // A retiring callback or finalizer can unregister after the waiter
+                            // exits, or before a newly registered waiter was allowed to start.
+                            ProcessRemovalsUnderLock();
+                        }
+#endif
                     }
                 }
                 finally

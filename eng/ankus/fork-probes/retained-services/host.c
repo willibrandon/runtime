@@ -11,6 +11,10 @@
 #include <sys/wait.h>
 #include <time.h>
 #include <unistd.h>
+#ifdef __linux__
+#include <dirent.h>
+#include <fcntl.h>
+#endif
 
 /* Fixed-width signatures match the Cdecl UnmanagedCallersOnly exports. */
 typedef void (*report_fn)(int32_t marker, int64_t value);
@@ -34,7 +38,9 @@ enum retained_mode
 {
     RETAINED_NONE = 0,
     RETAINED_TIMER = 1,
-    RETAINED_QUEUE = 2
+    RETAINED_QUEUE = 2,
+    RETAINED_WAITS = 3,
+    RETAINED_WAIT_RETIREMENT = 4
 };
 
 enum retained_size
@@ -57,7 +63,9 @@ enum retained_command
     RETAINED_READ_READY = 9,
     RETAINED_SET_DEADLINE = 10,
     RETAINED_SET_TOKEN = 11,
-    RETAINED_READ_TOKEN = 12
+    RETAINED_READ_TOKEN = 12,
+    RETAINED_WAIT_FOR_WAITER_EXIT = 13,
+    RETAINED_UNREGISTER_COMPLETED = 14
 };
 
 /* Host settings never change managed runtime configuration or the process environment. */
@@ -84,6 +92,8 @@ static struct
     int64_t snapshot_time;
     int64_t timer_deadline;
     int64_t token[2];
+    int waiters_before;
+    int waiters_after;
     enum retained_mode mode;
     bool armed;
 } retained;
@@ -220,6 +230,91 @@ pause_milliseconds(int duration)
     return true;
 }
 
+/* Observes actual Linux wait-thread exit before an active callback attempts unregister. */
+static int
+count_wait_threads(void)
+{
+#ifdef __linux__
+    DIR *directory = opendir("/proc/self/task");
+    if (directory == NULL)
+    {
+        return -1;
+    }
+
+    int count = 0;
+    struct dirent *entry;
+    for (;;)
+    {
+        errno = 0;
+        entry = readdir(directory);
+        if (entry == NULL)
+        {
+            if (errno != 0)
+            {
+                count = -1;
+            }
+
+            break;
+        }
+
+        if (entry->d_name[0] < '0' || entry->d_name[0] > '9')
+        {
+            continue;
+        }
+
+        int thread = openat(dirfd(directory), entry->d_name, O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+        if (thread < 0)
+        {
+            if (errno == ENOENT)
+            {
+                continue;
+            }
+
+            count = -1;
+            break;
+        }
+
+        int name = openat(thread, "comm", O_RDONLY | O_CLOEXEC);
+        int open_error = errno;
+        close(thread);
+        if (name < 0)
+        {
+            if (open_error == ENOENT || open_error == ESRCH)
+            {
+                continue;
+            }
+
+            count = -1;
+            break;
+        }
+
+        char buffer[16] = {0};
+        ssize_t length;
+        do
+        {
+            length = read(name, buffer, sizeof(buffer) - 1);
+        } while (length < 0 && errno == EINTR);
+        int read_error = errno;
+        close(name);
+        if (length < 0 && read_error != ESRCH)
+        {
+            count = -1;
+            break;
+        }
+
+        if (length == 13 && memcmp(buffer, ".NET TP Wait\n", 13) == 0)
+        {
+            count++;
+        }
+    }
+
+    closedir(directory);
+    return count;
+#else
+    return -1;
+#endif
+}
+
 /* Managed callbacks use this native-only ABI; it performs no PostgreSQL calls or managed reentry. */
 static int64_t
 retained_control(int32_t command, int32_t index, int64_t value)
@@ -287,6 +382,40 @@ retained_control(int32_t command, int32_t index, int64_t value)
         case RETAINED_READ_TOKEN:
             return index >= 0 && index < 2 ? retained.token[index] : 0;
 
+        case RETAINED_WAIT_FOR_WAITER_EXIT:
+        {
+            retained.waiters_before = count_wait_threads();
+            if (retained.waiters_before < 2)
+            {
+                return 0;
+            }
+
+            atomic_store_explicit(&retained.ready, 1, memory_order_release);
+            int64_t deadline = milliseconds() + 4000;
+            while (milliseconds() < deadline)
+            {
+                if (atomic_load_explicit(&retained.release, memory_order_acquire) != 0)
+                {
+                    retained.waiters_after = count_wait_threads();
+                    if (retained.waiters_after <= 0)
+                    {
+                        return retained.waiters_after == 0 ? 1 : 0;
+                    }
+                }
+
+                if (!pause_milliseconds(1))
+                {
+                    return 0;
+                }
+            }
+
+            return 0;
+        }
+
+        case RETAINED_UNREGISTER_COMPLETED:
+            atomic_store_explicit(&retained.ready, value == 1 ? 2 : -1, memory_order_release);
+            return 1;
+
         default:
             return -1;
     }
@@ -342,6 +471,28 @@ capture_retained_snapshot(void)
             retained.snapshot_valid = 0;
         }
     }
+    else if (retained.mode == RETAINED_WAITS || retained.mode == RETAINED_WAIT_RETIREMENT)
+    {
+        for (int index = 0; index < RETAINED_ITEM_COUNT; index++)
+        {
+            if (retained.snapshot_counts[index] != 0)
+            {
+                retained.snapshot_valid = 0;
+            }
+        }
+
+        if (retained.snapshot_time >= retained.timer_deadline)
+        {
+            retained.snapshot_valid = 0;
+        }
+
+        if (retained.mode == RETAINED_WAIT_RETIREMENT &&
+            (atomic_load_explicit(&retained.ready, memory_order_acquire) != 2 ||
+             retained.waiters_before < 2 || retained.waiters_after != 0))
+        {
+            retained.snapshot_valid = 0;
+        }
+    }
     else
     {
         retained.snapshot_valid = 0;
@@ -352,7 +503,7 @@ capture_retained_snapshot(void)
 static void
 release_retained_worker(void)
 {
-    if (retained.armed && retained.mode == RETAINED_QUEUE)
+    if (retained.armed && (retained.mode == RETAINED_QUEUE || retained.mode == RETAINED_WAIT_RETIREMENT))
     {
         atomic_store_explicit(&retained.release, 1, memory_order_release);
     }
@@ -371,6 +522,8 @@ reset_retained(enum retained_mode mode)
     retained.pending_local = 0;
     retained.token[0] = 0;
     retained.token[1] = 0;
+    retained.waiters_before = -1;
+    retained.waiters_after = -1;
     atomic_store_explicit(&retained.ready, 0, memory_order_release);
     atomic_store_explicit(&retained.release, 0, memory_order_release);
     for (int index = 0; index < RETAINED_ITEM_COUNT; index++)
@@ -385,10 +538,16 @@ static void
 emit_retained_snapshot(void)
 {
     emit("snapshot-valid", 0, retained.snapshot_valid);
-    if (retained.mode == RETAINED_TIMER)
+    if (retained.mode == RETAINED_TIMER || retained.mode == RETAINED_WAITS || retained.mode == RETAINED_WAIT_RETIREMENT)
     {
         emit("snapshot-timer-count", 0, retained.snapshot_counts[0]);
         emit("snapshot-deadline-remaining-ms", 0, retained.timer_deadline - retained.snapshot_time);
+        if (retained.mode == RETAINED_WAIT_RETIREMENT)
+        {
+            emit("snapshot-waiters-before", 0, retained.waiters_before);
+            emit("snapshot-waiters-after", 0, retained.waiters_after);
+            emit("snapshot-unregister-completed", 0, atomic_load_explicit(&retained.ready, memory_order_acquire));
+        }
     }
     else
     {
@@ -612,7 +771,9 @@ run_retained(struct options options, retained_prepare_fn prepare, retained_run_f
     {
         current_round = round;
         current_role = "parent-prepare";
-        current_stage = options.retained == RETAINED_TIMER ? "retained-timer" : "retained-queue";
+        current_stage = options.retained == RETAINED_TIMER ? "retained-timer" :
+            options.retained == RETAINED_QUEUE ? "retained-queue" :
+            options.retained == RETAINED_WAITS ? "retained-waits" : "retained-wait-retirement";
         reset_retained(options.retained);
         emit("begin", 0, options.retained);
         int result = prepare(options.retained, round, retained_control, report);
@@ -857,6 +1018,14 @@ main(int argc, char **argv)
         else if (strcmp(argv[argument], "--retained-queue") == 0 && options.retained == RETAINED_NONE)
         {
             options.retained = RETAINED_QUEUE;
+        }
+        else if (strcmp(argv[argument], "--retained-waits") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_WAITS;
+        }
+        else if (strcmp(argv[argument], "--retained-wait-retirement") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_WAIT_RETIREMENT;
         }
         else if (strcmp(argv[argument], "--descendants") == 0 && options.descendants == 0)
         {

@@ -17,11 +17,22 @@ dotnet publish -c Release -r linux-x64 -o publish -p:ForkRuntimePrototype=true -
 cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -pthread -o host
 ./host "$PWD/publish/NativeForkProbe.so" --retained-timer --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-queue --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-waits --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-wait-retirement --enable-fork
 ```
 
 The timer must be unfired at the native checkpoint and fire once in each process.
 The queue must still contain original objects from both local and global queues;
 all original items must complete once with exact values in each process.
+
+The wait checks span two wait threads. They preserve safe and unsafe callback
+contexts, original registrations and handles, one-shot and repeating signals,
+a finite timeout, and cancellation before fork. The retirement case also observes
+both wait threads disappear from Linux's native thread list before an active worker
+unregisters an existing wait and registers/unregisters another. Both operations must
+finish while thread activation is closed. Callback counts, completion notifications
+and independent parent/child state are checked exactly. The thread-exit observation
+uses `/proc/self/task` and requires Linux.
 
 The same host checks successive generations:
 

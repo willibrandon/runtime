@@ -19,6 +19,16 @@ public static unsafe class RetainedServicesProbe
     private const int QueueMode = 2;
 
     /// <summary>
+    /// Identifies original registered waits and timeout deadlines.
+    /// </summary>
+    private const int WaitMode = 3;
+
+    /// <summary>
+    /// Identifies unregister requests made after native wait threads exit during preparation.
+    /// </summary>
+    private const int WaitRetirementMode = 4;
+
+    /// <summary>
     /// Counts the items enqueued from the native caller's managed setup frame.
     /// </summary>
     private const int GlobalCount = 16;
@@ -66,7 +76,7 @@ public static unsafe class RetainedServicesProbe
     /// <summary>
     /// Creates objects in the parent that must remain pending at the actual native fork snapshot.
     /// </summary>
-    /// <param name="mode">One selects a timer; two selects queued work.</param>
+    /// <param name="mode">One selects a timer, two queued work, three waits, and four unregister during retirement.</param>
     /// <param name="round">The exact next setup count, beginning at one.</param>
     /// <param name="control">The process-lifetime native atomic observation callback.</param>
     /// <param name="report">The synchronous native result marker callback.</param>
@@ -90,6 +100,8 @@ public static unsafe class RetainedServicesProbe
             {
                 TimerMode => PrepareTimer(token),
                 QueueMode => PrepareQueue(token),
+                WaitMode => RegisteredWaitProbe.Prepare(token, control, false),
+                WaitRetirementMode => RegisteredWaitProbe.Prepare(token, control, true),
                 _ => 102,
             };
 
@@ -107,7 +119,7 @@ public static unsafe class RetainedServicesProbe
     /// <summary>
     /// Requires completion of the same pending objects without rearming or requeueing them.
     /// </summary>
-    /// <param name="mode">One selects the retained timer; two selects the retained batch.</param>
+    /// <param name="mode">One selects a timer, two queued work, three waits, and four unregister during retirement.</param>
     /// <param name="round">The original setup count retained independently by native code.</param>
     /// <param name="nativePid">The current process identifier from native code.</param>
     /// <param name="parentPid">The original managed parent's native process identifier.</param>
@@ -128,6 +140,7 @@ public static unsafe class RetainedServicesProbe
             {
                 TimerMode => CheckTimer(nativePid != parentPid, report),
                 QueueMode => CheckQueue(nativePid != parentPid, report),
+                WaitMode or WaitRetirementMode => RegisteredWaitProbe.Check(nativePid, parentPid, report),
                 _ => 102,
             };
         }
