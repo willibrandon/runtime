@@ -755,7 +755,7 @@ HANDLE PalCreateEventW(_In_opt_ LPSECURITY_ATTRIBUTES pEventAttributes, UInt32_B
 
 typedef uint32_t(__stdcall *BackgroundCallback)(_In_opt_ void* pCallbackContext);
 
-bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext, UInt32_BOOL highPriority)
+bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext, UInt32_BOOL highPriority, pthread_t* joinableThread = nullptr)
 {
 #ifdef HOST_WASM
     // No threads, so we can't start one
@@ -788,12 +788,18 @@ bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCa
     st = pthread_attr_setschedparam(&attrs, &params);
     ASSERT(st == 0);
 #endif
-    // Create the thread as detached, that means not joinable
-    st = pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
+    // Server collectors retain a join handle so checkpoint preparation can wait
+    // for all native teardown. Other background threads keep their existing lifetime.
+    st = pthread_attr_setdetachstate(&attrs, joinableThread != nullptr ? PTHREAD_CREATE_JOINABLE : PTHREAD_CREATE_DETACHED);
     ASSERT(st == 0);
 
     pthread_t threadId;
     st = pthread_create(&threadId, &attrs, (void *(*)(void*))callback, pCallbackContext);
+
+    if (st == 0 && joinableThread != nullptr)
+    {
+        *joinableThread = threadId;
+    }
 
     int st2 = pthread_attr_destroy(&attrs);
     ASSERT(st2 == 0);
@@ -819,6 +825,36 @@ void RhForkRecordBackgroundWorker();
 bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
+}
+
+bool PalStartJoinableGCThread(BackgroundCallback callback, void* context, void** handle)
+{
+    pthread_t* thread = new (nothrow) pthread_t;
+    if (thread == nullptr)
+    {
+        return false;
+    }
+
+    if (!PalStartBackgroundWork(callback, context, UInt32_FALSE, thread))
+    {
+        delete thread;
+        return false;
+    }
+
+    *handle = thread;
+    return true;
+}
+
+bool PalJoinGCThread(void* handle)
+{
+    pthread_t* thread = static_cast<pthread_t*>(handle);
+    if (thread == nullptr || pthread_join(*thread, nullptr) != 0)
+    {
+        return false;
+    }
+
+    delete thread;
+    return true;
 }
 
 bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)

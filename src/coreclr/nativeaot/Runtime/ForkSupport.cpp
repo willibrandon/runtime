@@ -76,7 +76,7 @@ namespace
     bool HasSupportedConfiguration()
     {
         return s_diagnosticsImplementationDisabledAtStartup && !s_backgroundWorkerStarted.load() &&
-            !GCHeapUtilities::IsServerHeap() && RhIsOwnedGCForFork(GCHeapUtilities::GetGCHeap());
+            RhIsOwnedGCForFork(GCHeapUtilities::GetGCHeap());
     }
 
     void InvokeServiceCallback(ForkServiceCallback callback, const char* failure)
@@ -125,7 +125,7 @@ namespace
 
         if (!RhPrepareGCForFork(GCHeapUtilities::GetGCHeap(), 30000))
         {
-            ForkFailure("NativeAOT fork prototype: workstation GC did not retire its background worker.\n");
+            ForkFailure("NativeAOT fork prototype: GC did not retire its collectors.\n");
         }
 
         ThreadStore* store = GetThreadStore();
@@ -189,7 +189,7 @@ namespace
         store->UnlockThreadStore();
         if (!supported)
         {
-            ForkFailure("NativeAOT fork prototype: checkpoint requires only caller/finalizer and fully retired workstation GC.\n");
+            ForkFailure("NativeAOT fork prototype: checkpoint requires only caller/finalizer and fully retired collectors.\n");
         }
 
         // Admission remains closed and the only other runtime thread is parked outside
@@ -206,7 +206,7 @@ namespace
         s_state.store(ForkState::ParentResuming);
         if (!RhResumeGCForFork())
         {
-            ForkFailure("NativeAOT fork prototype: parent workstation GC resume failed.\n");
+            ForkFailure("NativeAOT fork prototype: parent GC resume failed.\n");
         }
 
         InvokeServiceCallback(s_resumeParentServices,
@@ -261,7 +261,7 @@ namespace
         s_state.store(ForkState::ChildResuming);
         if (!RhResumeGCForFork())
         {
-            ForkFailure("NativeAOT fork prototype: child workstation GC resume failed.\n");
+            ForkFailure("NativeAOT fork prototype: child GC resume failed.\n");
         }
 
         InvokeServiceCallback(s_resumeChildServices,

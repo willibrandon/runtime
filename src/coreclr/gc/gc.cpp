@@ -61,9 +61,8 @@ namespace WKS {
 #include "gcpriv.h"
 
 #if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
-     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
-// The fork gate is independent of application GC configuration and temporary
-// concurrent-GC disable requests from other runtime subsystems.
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+// These gates do not modify configured GC modes or temporary BGC-disable counts.
 static std::atomic<bool> s_forkGCAdmissionClosed(false);
 static std::atomic<bool> s_forkGCExitRequested(false);
 static std::atomic<bool> s_forkGCReady(false);
@@ -72,40 +71,108 @@ static IGCHeap* s_forkOwnedGCHeap;
 
 static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr), "Fork observations require a lock-free 64-bit counter.");
 
-// A passive observation of actual active collection state while gc_lock is held.
-// Reading or recording it never changes collection selection or worker progress.
+#ifdef SERVER_GC
+static void** s_forkServerThreads;
+static std::atomic<int> s_forkServerThreadsRunning(0);
+static std::atomic<int> s_forkServerThreadsStarted(0);
+static std::atomic<bool> s_forkServerCoordinatorStop(false);
+static std::atomic<bool> s_forkServerCoordinatorRunning(false);
+static bool s_forkServerRestart;
+
+extern "C" bool RhCreateServerGCThreadForFork(void (*start)(void*), void* context, void** handle);
+extern "C" bool RhJoinServerGCThreadForFork(void* handle);
+
+extern "C" bool RhIsOwnedServerGCForFork(IGCHeap* heap)
+{
+    return heap != nullptr && heap == s_forkOwnedGCHeap;
+}
+
+extern "C" bool RhPrepareServerGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds)
+{
+    return RhIsOwnedServerGCForFork(heap) && gc_heap::prepare_for_fork(timeoutMilliseconds);
+}
+
+extern "C" bool RhIsServerGCReadyForFork() { return s_forkGCReady.load(); }
+extern "C" bool RhResumeServerGCForFork() { return gc_heap::resume_after_fork(); }
+extern "C" uint64_t RhGetServerForkGCActiveObservationCount() { return s_forkGCActiveObservations.load(); }
+extern "C" int32_t RhGetServerForkGCHeapCount(bool maximum) { return gc_heap::fork_heap_count(maximum); }
+#else
+#ifdef FEATURE_SVR_GC
+extern "C" bool RhIsOwnedServerGCForFork(IGCHeap* heap);
+extern "C" bool RhPrepareServerGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds);
+extern "C" bool RhIsServerGCReadyForFork();
+extern "C" bool RhResumeServerGCForFork();
+extern "C" uint64_t RhGetServerForkGCActiveObservationCount();
+extern "C" int32_t RhGetServerForkGCHeapCount(bool maximum);
+#endif
+
 extern "C" __attribute__((visibility("default"))) uint64_t RhGetForkGCActiveObservationCount()
 {
+#ifdef FEATURE_SVR_GC
+    if (s_forkOwnedGCHeap == nullptr)
+    {
+        return RhGetServerForkGCActiveObservationCount();
+    }
+#endif
     return s_forkGCActiveObservations.load();
+}
+
+// Passive topology observation, explicitly rooted and exported only by probe hosts.
+extern "C" __attribute__((visibility("default"))) int32_t RhGetForkGCHeapCount(int32_t maximum)
+{
+#ifdef FEATURE_SVR_GC
+    if (s_forkOwnedGCHeap == nullptr)
+    {
+        return RhGetServerForkGCHeapCount(maximum != 0);
+    }
+#endif
+    return 1;
 }
 
 extern "C" bool RhIsOwnedGCForFork(IGCHeap* heap)
 {
+#ifdef FEATURE_SVR_GC
+    if (RhIsOwnedServerGCForFork(heap))
+    {
+        return true;
+    }
+#endif
     return heap != nullptr && heap == s_forkOwnedGCHeap;
 }
 
 extern "C" bool RhPrepareGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds)
 {
-    return RhIsOwnedGCForFork(heap) && gc_heap::prepare_for_fork(timeoutMilliseconds);
+#ifdef FEATURE_SVR_GC
+    if (RhIsOwnedServerGCForFork(heap))
+    {
+        return RhPrepareServerGCForFork(heap, timeoutMilliseconds);
+    }
+#endif
+    return heap != nullptr && heap == s_forkOwnedGCHeap && gc_heap::prepare_for_fork(timeoutMilliseconds);
 }
 
 extern "C" bool RhIsGCReadyForFork()
 {
+#ifdef FEATURE_SVR_GC
+    if (s_forkOwnedGCHeap == nullptr)
+    {
+        return RhIsServerGCReadyForFork();
+    }
+#endif
     return s_forkGCReady.load();
 }
 
 extern "C" bool RhResumeGCForFork()
 {
-    if (!s_forkGCReady.load() || !s_forkGCAdmissionClosed.load())
+#ifdef FEATURE_SVR_GC
+    if (s_forkOwnedGCHeap == nullptr)
     {
-        return false;
+        return RhResumeServerGCForFork();
     }
-
-    s_forkGCExitRequested.store(false);
-    s_forkGCReady.store(false);
-    s_forkGCAdmissionClosed.store(false);
-    return true;
+#endif
+    return gc_heap::resume_after_fork();
 }
+#endif // SERVER_GC
 #endif
 
 #ifdef TARGET_AMD64
@@ -7136,7 +7203,29 @@ void set_thread_affinity_for_heap (int heap_number, uint16_t proc_no)
 bool gc_heap::create_gc_thread ()
 {
     dprintf (3, ("Creating gc thread\n"));
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+    s_forkServerThreadsRunning.fetch_add(1);
+    if (heap_number == 0)
+    {
+        s_forkServerCoordinatorRunning.store(true);
+    }
+
+    if (!RhCreateServerGCThreadForFork(gc_thread_stub, this, &s_forkServerThreads[heap_number]))
+    {
+        s_forkServerThreadsRunning.fetch_sub(1);
+        if (heap_number == 0)
+        {
+            s_forkServerCoordinatorRunning.store(false);
+        }
+
+        return false;
+    }
+
+    return true;
+#else
     return GCToEEInterface::CreateThread(gc_thread_stub, this, false, ".NET Server GC");
+#endif
 }
 
 #ifdef _MSC_VER
@@ -7150,8 +7239,37 @@ void gc_heap::gc_thread_function ()
 
     heap_select::init_cpu_mapping(heap_number);
 
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+#ifdef DYNAMIC_HEAP_COUNT
+    bool resumeInactive = s_forkServerRestart &&
+        dynamic_adaptation_mode == dynamic_adaptation_to_application_sizes && heap_number >= n_heaps;
+#endif
+    // Publish startup only after the initial wait branch is fixed. Heap zero is
+    // started last during recovery and cannot change heap count before this point.
+    s_forkServerThreadsStarted.fetch_add(1);
+#ifdef DYNAMIC_HEAP_COUNT
+    if (resumeInactive)
+    {
+        gc_idle_thread_event.Wait(INFINITE, FALSE);
+        if (s_forkGCExitRequested.load())
+        {
+            return;
+        }
+    }
+#endif
+#endif
+
     while (1)
     {
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+        if ((heap_number == 0 && s_forkServerCoordinatorStop.load()) ||
+            (heap_number != 0 && s_forkGCExitRequested.load()))
+        {
+            return;
+        }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
         if (gc_heap::dynamic_adaptation_mode == dynamic_adaptation_to_application_sizes)
         {
@@ -7191,6 +7309,13 @@ void gc_heap::gc_thread_function ()
             }
 #endif //DYNAMIC_HEAP_COUNT
             uint32_t wait_result = gc_heap::ee_suspend_event.Wait(wait_on_time_out_p ? wait_time : INFINITE, FALSE);
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+            if (s_forkServerCoordinatorStop.load())
+            {
+                return;
+            }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
             dprintf (9999, ("waiting for ee done res %d (timeout %d, %I64d ms since last suspend end)(should_change_heap_count is %d) (gradual_decommit_in_progress_p %d)",
                 wait_result, wait_time, ((GetHighPrecisionTimeStamp() - last_suspended_end_time) / 1000),
@@ -7295,6 +7420,13 @@ void gc_heap::gc_thread_function ()
         {
             dprintf (9999, ("GC thread %d waiting_for_gc_start(%d)(gc%Id)", heap_number, n_heaps, VolatileLoadWithoutBarrier(&settings.gc_index)));
             gc_start_event.Wait(INFINITE, FALSE);
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+            if (s_forkGCExitRequested.load())
+            {
+                return;
+            }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
             dprintf (9999, ("GC thread %d waiting_done_gc_start(%d-%d)(i: %d)(gc%Id)",
                 heap_number, n_heaps, dynamic_heap_count_data.new_n_heaps, dynamic_heap_count_data.init_only_p, VolatileLoadWithoutBarrier (&settings.gc_index)));
@@ -7331,6 +7463,13 @@ void gc_heap::gc_thread_function ()
                             dprintf (9999, ("GC thread %d wait_on_idle(%d < %d)(gc%Id), total idle %d", heap_number, old_n_heaps, new_n_heaps,
                                 VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                             gc_idle_thread_event.Wait (INFINITE, FALSE);
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+                            if (s_forkGCExitRequested.load())
+                            {
+                                return;
+                            }
+#endif
                             dprintf (9999, ("GC thread %d waking_from_idle(%d)(gc%Id) after doing change", heap_number, n_heaps, VolatileLoadWithoutBarrier (&settings.gc_index)));
                         }
                     }
@@ -7347,6 +7486,13 @@ void gc_heap::gc_thread_function ()
                     dprintf (9999, ("GC thread %d wait_on_idle(< max %d)(gc%Id), total  idle %d", heap_number, num_threads_to_wake,
                         VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                     gc_idle_thread_event.Wait (INFINITE, FALSE);
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+                    if (s_forkGCExitRequested.load())
+                    {
+                        return;
+                    }
+#endif
                     dprintf (9999, ("GC thread %d waking_from_idle(%d)(gc%Id)", heap_number, n_heaps, VolatileLoadWithoutBarrier (&settings.gc_index)));
                 }
 
@@ -24652,7 +24798,7 @@ void gc_heap::garbage_collect (int n)
             gc_can_use_concurrent &&
             !temp_disable_concurrent_p &&
 #if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
-     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
             !s_forkGCAdmissionClosed.load() &&
 #endif
             ((settings.pause_mode == pause_interactive) || (settings.pause_mode == pause_sustained_low_latency)))
@@ -24934,6 +25080,10 @@ void gc_heap::garbage_collect (int n)
             }
             else
             {
+                // do_pre_gc selected a new BGC record before thread/mark-array
+                // setup could fail. This collection will now be blocking, so
+                // preserve the previous completed background record.
+                last_bgc_info_index = !last_bgc_info_index;
                 settings.compaction = TRUE;
                 c_write (settings.concurrent, FALSE);
             }
@@ -38205,6 +38355,15 @@ void gc_heap::gc_thread_stub (void* arg)
     GCToOSInterface::BoostThreadPriority();
     void* tmp = _alloca (256*heap->heap_number);
     heap->gc_thread_function();
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+    if (heap->heap_number == 0)
+    {
+        s_forkServerCoordinatorRunning.store(false);
+    }
+
+    s_forkServerThreadsRunning.fetch_sub(1);
+#endif
 }
 #ifdef _MSC_VER
 #pragma warning(pop)
@@ -40306,7 +40465,17 @@ void gc_heap::kill_gc_thread()
 }
 
 #if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
-     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+int32_t gc_heap::fork_heap_count(bool maximum)
+{
+#ifdef MULTIPLE_HEAPS
+    return maximum ? n_max_heaps : VolatileLoad(&n_heaps);
+#else
+    UNREFERENCED_PARAMETER(maximum);
+    return 1;
+#endif
+}
+
 bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
 {
     bool expected = false;
@@ -40322,25 +40491,11 @@ bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
         bool idle = false;
         if (try_enter_spin_lock(&gc_lock))
         {
-            // BGC releases gc_lock while sweeping. Acquiring it alone does not
-            // prove completion; include both selected and actively running work.
             idle = !settings.concurrent && !is_bgc_in_progress();
             if (!idle && !observedActive)
             {
                 s_forkGCActiveObservations.fetch_add(1);
                 observedActive = true;
-            }
-
-            if (idle)
-            {
-                bgc_threads_timeout_cs.Enter();
-                s_forkGCExitRequested.store(true);
-                if (bgc_thread_running)
-                {
-                    bgc_start_event.Set();
-                }
-
-                bgc_threads_timeout_cs.Leave();
             }
 
             leave_spin_lock(&gc_lock);
@@ -40359,17 +40514,80 @@ bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
         GCToOSInterface::Sleep(1);
     }
 
+#ifdef MULTIPLE_HEAPS
+    // Heap zero can initiate DATAS heap-count changes without a new allocation.
+    // Let it finish with every other collector available before stopping peers.
+    s_forkServerCoordinatorStop.store(true);
+    ee_suspend_event.Set();
+    while (s_forkServerCoordinatorRunning.load())
+    {
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+    if (!RhJoinServerGCThreadForFork(s_forkServerThreads[0]))
+    {
+        return false;
+    }
+
+    s_forkServerThreads[0] = nullptr;
+    int count = n_max_heaps;
+#else
+    int count = 1;
+#endif
+
+    s_forkGCExitRequested.store(true);
+    for (int index = 0; index < count; index++)
+    {
+#ifdef MULTIPLE_HEAPS
+        gc_heap* heap = g_heaps[index];
+#ifdef DYNAMIC_HEAP_COUNT
+        if (index != 0)
+        {
+            heap->gc_idle_thread_event.Set();
+            heap->bgc_idle_thread_event.Set();
+        }
+#endif
+#else
+        gc_heap* heap = pGenGCHeap;
+#endif
+        heap->bgc_threads_timeout_cs.Enter();
+        if (heap->bgc_thread_running)
+        {
+            heap->bgc_start_event.Set();
+        }
+
+        heap->bgc_threads_timeout_cs.Leave();
+    }
+
+#ifdef MULTIPLE_HEAPS
+    gc_start_event.Set();
+#endif
     while (true)
     {
-        bgc_threads_timeout_cs.Enter();
-        bool retired = !bgc_thread_running && bgc_thread == nullptr;
-        bgc_threads_timeout_cs.Leave();
+        bool retired = true;
+        for (int index = 0; index < count; index++)
+        {
+#ifdef MULTIPLE_HEAPS
+            gc_heap* heap = g_heaps[index];
+#else
+            gc_heap* heap = pGenGCHeap;
+#endif
+            heap->bgc_threads_timeout_cs.Enter();
+            retired &= !heap->bgc_thread_running && heap->bgc_thread == nullptr;
+            heap->bgc_threads_timeout_cs.Leave();
+        }
+
+#ifdef MULTIPLE_HEAPS
+        retired &= s_forkServerThreadsRunning.load() == 0;
+#endif
         if (retired)
         {
-            // Runtime ThreadStore drain plus complete native shutdown accounting
-            // separately acknowledge that this worker has finished its teardown.
-            s_forkGCReady.store(true);
-            return true;
+            break;
         }
 
         if (elapsed++ == timeoutMilliseconds)
@@ -40379,6 +40597,95 @@ bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
 
         GCToOSInterface::Sleep(1);
     }
+
+#ifdef MULTIPLE_HEAPS
+    for (int index = 1; index < count; index++)
+    {
+        if (!RhJoinServerGCThreadForFork(s_forkServerThreads[index]))
+        {
+            return false;
+        }
+
+        s_forkServerThreads[index] = nullptr;
+#ifdef DYNAMIC_HEAP_COUNT
+        g_heaps[index]->gc_idle_thread_event.Reset();
+        g_heaps[index]->bgc_idle_thread_event.Reset();
+#endif
+    }
+
+    ee_suspend_event.Reset();
+    gc_start_event.Reset();
+#ifdef DYNAMIC_HEAP_COUNT
+    total_bgc_threads = 0;
+    last_total_bgc_threads = 0;
+    dynamic_heap_count_data.idle_bgc_thread_count = 0;
+#endif
+#endif
+    // Server collectors share this manual event. Keep it signaled until every
+    // background collector has left its wait, then reset it once for recovery.
+    if (bgc_start_event.IsValid())
+    {
+        bgc_start_event.Reset();
+    }
+
+    s_forkGCReady.store(true);
+    return true;
+}
+
+bool gc_heap::resume_after_fork()
+{
+    if (!s_forkGCReady.load() || !s_forkGCAdmissionClosed.load())
+    {
+        return false;
+    }
+
+    s_forkGCExitRequested.store(false);
+#ifdef MULTIPLE_HEAPS
+    s_forkServerRestart = true;
+    s_forkServerCoordinatorStop.store(false);
+    s_forkServerThreadsStarted.store(0);
+    for (int index = 1; index < n_max_heaps; index++)
+    {
+        if (!g_heaps[index]->create_gc_thread())
+        {
+            return false;
+        }
+    }
+
+    uint32_t elapsed = 0;
+    while (s_forkServerThreadsStarted.load() != n_max_heaps - 1)
+    {
+        if (elapsed++ == 10000)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+    if (!g_heaps[0]->create_gc_thread())
+    {
+        return false;
+    }
+#endif
+    s_forkGCReady.store(false);
+    s_forkGCAdmissionClosed.store(false);
+    return true;
+}
+
+bool gc_heap::retire_bgc_for_fork()
+{
+    if (!s_forkGCExitRequested.load())
+    {
+        return false;
+    }
+
+    bgc_threads_timeout_cs.Enter();
+    bgc_thread_running = FALSE;
+    bgc_thread = nullptr;
+    bgc_thread_id.Clear();
+    bgc_threads_timeout_cs.Leave();
+    return true;
 }
 #endif
 
@@ -40400,6 +40707,13 @@ void gc_heap::bgc_thread_function()
         dprintf (6666, ("h%d bgc thread: waiting...", heap_number));
 
         cooperative_mode = enable_preemptive ();
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+        if (retire_bgc_for_fork())
+        {
+            break;
+        }
+#endif
         //current_thread->m_fPreemptiveGCDisabled = 0;
 
         uint32_t result = bgc_start_event.Wait(
@@ -40424,18 +40738,9 @@ void gc_heap::bgc_thread_function()
         // when we've done the init work.
 
 #if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
-     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
-        if (s_forkGCExitRequested.load())
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+        if (retire_bgc_for_fork())
         {
-            // The request is published only after the last BGC completed and new
-            // selection was closed. Retire outside the event wait, preserving the
-            // heap and reusable events for ordinary lazy startup after the fork.
-            bgc_threads_timeout_cs.Enter();
-            bgc_start_event.Reset();
-            bgc_thread_running = FALSE;
-            bgc_thread = nullptr;
-            bgc_thread_id.Clear();
-            bgc_threads_timeout_cs.Leave();
             break;
         }
 #endif
@@ -49474,7 +49779,7 @@ HRESULT GCHeap::Init(size_t hn)
 HRESULT GCHeap::Initialize()
 {
 #if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
-     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     // An externally loaded collector cannot borrow this built-in heap's fork API.
     s_forkOwnedGCHeap = this;
 #endif
@@ -49762,6 +50067,14 @@ HRESULT GCHeap::Initialize()
     }
     gc_heap::n_max_heaps = nhp;
     gc_heap::n_heaps = nhp;
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+    s_forkServerThreads = new (nothrow) void*[nhp]();
+    if (s_forkServerThreads == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+#endif
     hr = gc_heap::initialize_gc (seg_size, large_seg_size, pin_seg_size, nhp);
 #else
     hr = gc_heap::initialize_gc (seg_size, large_seg_size, pin_seg_size);

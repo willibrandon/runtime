@@ -44,6 +44,11 @@ public static unsafe class ProbeExports
     private static int s_initializations;
 
     /// <summary>
+    /// Retains the configured collector mode so recovery cannot silently change it.
+    /// </summary>
+    private static bool s_serverGc;
+
+    /// <summary>
     /// Creates parent state before the native host warms facilities and forks outside all managed frames.
     /// </summary>
     /// <param name="nativePid">The host's independent getpid result.</param>
@@ -59,6 +64,7 @@ public static unsafe class ProbeExports
                 return 1;
             }
 
+            s_serverGc = System.Runtime.GCSettings.IsServerGC;
             s_parentPid = nativePid;
             s_managedPidSnapshot = Environment.ProcessId;
             s_token = Guid.NewGuid();
@@ -73,6 +79,7 @@ public static unsafe class ProbeExports
 
             report(1, s_managedPidSnapshot);
             report(2, s_initializations);
+            report(3, System.Runtime.GCSettings.IsServerGC ? 1 : 0);
             return s_managedPidSnapshot == nativePid ? 0 : 2;
         }
         catch (Exception error)
@@ -85,7 +92,7 @@ public static unsafe class ProbeExports
     /// <summary>
     /// Returns the original process and nondeterministic token for the native host to retain across fork.
     /// </summary>
-    /// <param name="field">Zero selects the managed PID snapshot; one and two select token words.</param>
+    /// <param name="field">Zero selects the PID, one and two select token words, and four selects server GC.</param>
     /// <returns>The selected parent snapshot value, or the initialization count for field three.</returns>
     [UnmanagedCallersOnly(EntryPoint = "fork_probe_snapshot", CallConvs = [typeof(CallConvCdecl)])]
     public static long Snapshot(int field)
@@ -94,6 +101,7 @@ public static unsafe class ProbeExports
             0 => s_managedPidSnapshot,
             1 => TokenWord(0),
             2 => TokenWord(1),
+            4 => System.Runtime.GCSettings.IsServerGC ? 1 : 0,
             _ => s_initializations,
         };
 
@@ -166,6 +174,13 @@ public static unsafe class ProbeExports
     {
         try
         {
+            bool serverGc = System.Runtime.GCSettings.IsServerGC;
+            report(4, serverGc ? 1 : 0);
+            if (serverGc != s_serverGc)
+            {
+                return 98;
+            }
+
             return stage switch
             {
                 1 => CheckGraph(nativePid, parentPid, tokenLow, tokenHigh, report),

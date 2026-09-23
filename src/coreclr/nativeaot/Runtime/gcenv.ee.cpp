@@ -548,9 +548,13 @@ struct ThreadStubArguments
     const char* m_name;
 };
 
-static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, const char* name)
+static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, const char* name, void** joinHandle = nullptr)
 {
-    RhForkRecordBackgroundWorker();
+    if (joinHandle == nullptr)
+    {
+        RhForkRecordBackgroundWorker();
+    }
+
     ThreadStubArguments* threadStubArgs = new (nothrow) ThreadStubArguments();
     if (!threadStubArgs)
         return false;
@@ -584,6 +588,7 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
             PalSetCurrentThreadName(pStartContext->m_name);
             auto realStartRoutine = pStartContext->m_pRealStartRoutine;
             void* realContext = pStartContext->m_pRealContext;
+            delete[] pStartContext->m_name;
             delete pStartContext;
 
             STRESS_LOG_RESERVE_MEM(GC_STRESSLOG_MULTIPLY);
@@ -593,7 +598,16 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
             return 0;
         };
 
-    if (!PalStartBackgroundGCThread(threadStub, threadStubArgs))
+    bool started;
+#ifdef TARGET_UNIX
+    started = joinHandle != nullptr
+        ? PalStartJoinableGCThread(threadStub, threadStubArgs, joinHandle)
+        : PalStartBackgroundGCThread(threadStub, threadStubArgs);
+#else
+    ASSERT(joinHandle == nullptr);
+    started = PalStartBackgroundGCThread(threadStub, threadStubArgs);
+#endif
+    if (!started)
     {
         delete[] threadStubArgs->m_name;
         delete threadStubArgs;
@@ -602,6 +616,18 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
 
     return true;
 }
+
+#ifdef TARGET_UNIX
+extern "C" bool RhCreateServerGCThreadForFork(void (*start)(void*), void* context, void** handle)
+{
+    return CreateNonSuspendableThread(start, context, ".NET Server GC", handle);
+}
+
+extern "C" bool RhJoinServerGCThreadForFork(void* handle)
+{
+    return PalJoinGCThread(handle);
+}
+#endif
 
 bool GCToEEInterface::CreateThread(void (*threadStart)(void*), void* arg, bool is_suspendable, const char* name)
 {

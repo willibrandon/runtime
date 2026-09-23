@@ -249,6 +249,11 @@ bool PalSetCurrentThreadNameW(const WCHAR* name);
 bool PalInitComAndFlsSlot();
 #endif
 bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);
+#ifdef TARGET_UNIX
+// Joinable server collectors must finish native thread teardown before fork.
+bool PalStartJoinableGCThread(BackgroundCallback callback, void* context, void** handle);
+bool PalJoinGCThread(void* handle);
+#endif
 bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);
 bool PalStartEventPipeHelperThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);
 

@@ -25,6 +25,7 @@ struct options
     const char *library;
     bool minimal;
     bool enable;
+    bool expect_server_gc;
     int rounds;
 };
 
@@ -41,7 +42,7 @@ static const char *current_stage = "startup";
 static int current_round = 0;
 static const char *stage_names[] = {
     "invalid", "graph", "pid", "gc-finalizer", "thread-pool", "timer", "exception",
-    "active-heap-initialize", "active-request", "active-completed", "active-heap-recheck"
+    "active-heap-initialize", "active-request", "active-completed", "active-heap-recheck", "blocking-or-completed-request"
 };
 
 /* Appends trusted fixed labels into the bounded JSON record. */
@@ -125,6 +126,8 @@ emit(const char *event, int32_t marker, int64_t value)
         written += (size_t) result;
     }
 }
+
+#include "../collector-inventory.h"
 
 /* The synchronous managed callback never retains this process-lifetime native function pointer. */
 static void
@@ -211,6 +214,11 @@ invoke(run_fn run, int stage, pid_t parent, int64_t token_low, int64_t token_hig
     emit("begin", 0, stage);
     int result = run(stage, (int32_t) getpid(), (int32_t) parent, token_low, token_high, report);
     emit("result", 0, result);
+    if (!check_collector_inventory())
+    {
+        return 183;
+    }
+
     return result;
 }
 
@@ -246,6 +254,12 @@ run_worker(struct options options)
         return 2;
     }
 
+    emit("server-gc", 0, snapshot(4));
+    if (options.expect_server_gc && snapshot(4) != 1)
+    {
+        return 4;
+    }
+
     int64_t token_low = snapshot(1);
     int64_t token_high = snapshot(2);
     emit("snapshot-pid", 0, snapshot(0));
@@ -259,6 +273,12 @@ run_worker(struct options options)
         {
             return 2;
         }
+    }
+
+    if (options.enable &&
+        (!initialize_collector_inventory(library, snapshot(4) == 1) || !check_collector_inventory()))
+    {
+        return 180;
     }
 
     if (options.enable)
@@ -335,7 +355,7 @@ run_worker(struct options options)
 
                 // These checks share one child: inherited integrity, new BGC, rechecked data,
                 // then fresh callbacks. Stage three performs the sole child graph mutation.
-                const int child_stages[] = {9, 3, 10, 2, 4, 5, 6};
+                const int child_stages[] = {observed == 1 ? 9 : 11, 3, 10, 2, 4, 5, 6};
                 for (size_t index = 0; index < sizeof(child_stages) / sizeof(child_stages[0]); index++)
                 {
                     if (invoke(run, child_stages[index], parent, token_low, token_high, "child") != 0)
@@ -362,7 +382,7 @@ run_worker(struct options options)
                 failures++;
             }
 
-            const int parent_stages[] = {9, 3, 10, 2, 4, 5, 6};
+            const int parent_stages[] = {observed == 1 ? 9 : 11, 3, 10, 2, 4, 5, 6};
             for (size_t index = 0; index < sizeof(parent_stages) / sizeof(parent_stages[0]); index++)
             {
                 int stage = parent_stages[index];
@@ -437,12 +457,16 @@ main(int argc, char **argv)
         return 64;
     }
 
-    struct options options = {argv[1], false, false, 2};
+    struct options options = {argv[1], false, false, false, 2};
     for (int argument = 2; argument < argc; argument++)
     {
         if (strcmp(argv[argument], "--minimal") == 0)
         {
             options.minimal = true;
+        }
+        else if (strcmp(argv[argument], "--server-gc") == 0)
+        {
+            options.expect_server_gc = true;
         }
         else if (strcmp(argv[argument], "--enable-fork") == 0)
         {

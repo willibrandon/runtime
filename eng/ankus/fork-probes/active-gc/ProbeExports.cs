@@ -44,6 +44,11 @@ public static unsafe partial class ProbeExports
     private static int s_initializations;
 
     /// <summary>
+    /// Retains the configured collector mode so recovery cannot silently change it.
+    /// </summary>
+    private static bool s_serverGc;
+
+    /// <summary>
     /// Creates parent state before the native host warms facilities and forks outside all managed frames.
     /// </summary>
     /// <param name="nativePid">The host's independent getpid result.</param>
@@ -59,6 +64,7 @@ public static unsafe partial class ProbeExports
                 return 1;
             }
 
+            s_serverGc = System.Runtime.GCSettings.IsServerGC;
             s_parentPid = nativePid;
             s_managedPidSnapshot = Environment.ProcessId;
             s_token = Guid.NewGuid();
@@ -73,6 +79,7 @@ public static unsafe partial class ProbeExports
 
             report(1, s_managedPidSnapshot);
             report(2, s_initializations);
+            report(3, s_serverGc ? 1 : 0);
             return s_managedPidSnapshot == nativePid ? 0 : 2;
         }
         catch (Exception error)
@@ -86,7 +93,7 @@ public static unsafe partial class ProbeExports
     /// Returns the original process and nondeterministic token for the native host to retain across fork.
     /// </summary>
     /// <param name="field">Zero selects the managed PID snapshot; one and two select token words.</param>
-    /// <returns>The selected parent snapshot value, or the initialization count for field three.</returns>
+    /// <returns>The selected parent snapshot value, the initialization count for field three, or server GC mode for field four.</returns>
     [UnmanagedCallersOnly(EntryPoint = "fork_probe_snapshot", CallConvs = [typeof(CallConvCdecl)])]
     public static long Snapshot(int field)
         => field switch
@@ -94,6 +101,7 @@ public static unsafe partial class ProbeExports
             0 => s_managedPidSnapshot,
             1 => TokenWord(0),
             2 => TokenWord(1),
+            4 => System.Runtime.GCSettings.IsServerGC ? 1 : 0,
             _ => s_initializations,
         };
 
@@ -113,6 +121,13 @@ public static unsafe partial class ProbeExports
     {
         try
         {
+            bool serverGc = System.Runtime.GCSettings.IsServerGC;
+            report(4, serverGc ? 1 : 0);
+            if (serverGc != s_serverGc)
+            {
+                return 98;
+            }
+
             return stage switch
             {
                 1 => CheckGraph(nativePid, parentPid, tokenLow, tokenHigh, report),
@@ -125,6 +140,7 @@ public static unsafe partial class ProbeExports
                 8 => RequestActiveCollection(report),
                 9 => CheckActiveCollection(nativePid, parentPid, tokenLow, tokenHigh, report),
                 10 => CheckActiveHeap(report),
+                11 => CheckActiveCollection(nativePid, parentPid, tokenLow, tokenHigh, report, requireBackground: false),
                 _ => 99,
             };
         }
@@ -203,7 +219,7 @@ public static unsafe partial class ProbeExports
     private static int CheckCollection(int nativePid, int parentPid, long tokenLow, long tokenHigh,
         delegate* unmanaged[Cdecl]<int, long, void> report)
     {
-        byte[][] retained = new byte[1024][];
+        byte[][] retained = new byte[s_serverGc ? 8192 : 1024][];
         for (int index = 0; index < retained.Length; index++)
         {
             retained[index] = new byte[16384];
@@ -211,19 +227,35 @@ public static unsafe partial class ProbeExports
         }
 
         // The collector intentionally makes small old-generation heaps use a blocking collection.
-        // Promote a retained heap larger than its four-MiB threshold before requesting background work.
+        // Retain enough promoted data for the server heaps as well as the workstation heap.
         GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
         var completion = new Completion();
         WeakReference unreachable = CreateFinalizable(completion);
         report(30, retained.Length * 16384);
         long previousBackgroundIndex = GC.GetGCMemoryInfo(GCKind.Background).Index;
         report(33, previousBackgroundIndex);
-        GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: false);
         GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
-        for (int attempt = 0; attempt < 2000 && background.Index <= previousBackgroundIndex; attempt++)
+        for (int request = 0; request < 8 && background.Index <= previousBackgroundIndex; request++)
         {
-            Thread.Sleep(1);
-            background = GC.GetGCMemoryInfo(GCKind.Background);
+            // A first background request may legitimately fall back while its native
+            // threads start. Even then, completed-background metadata must stay valid.
+            GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: false, compacting: false);
+            for (int attempt = 0; attempt < 100; attempt++)
+            {
+                background = GC.GetGCMemoryInfo(GCKind.Background);
+                if (background.Index != 0 && (!background.Concurrent || background.Generation != GC.MaxGeneration))
+                {
+                    report(36, background.Index);
+                    return 36;
+                }
+
+                if (background.Index > previousBackgroundIndex)
+                {
+                    break;
+                }
+
+                Thread.Sleep(1);
+            }
         }
 
         report(34, background.Index);

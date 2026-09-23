@@ -107,14 +107,16 @@ public static unsafe partial class ProbeExports
     /// <param name="tokenLow">The native parent's retained first token word.</param>
     /// <param name="tokenHigh">The native parent's retained second token word.</param>
     /// <param name="report">Reports completed collection metadata and finalizer values.</param>
-    /// <returns>Zero for actual concurrent collection, finalization, and complete inherited heap integrity.</returns>
+    /// <param name="requireBackground">Whether native preparation observed the requested collection still running.</param>
+    /// <returns>Zero for valid collection metadata, finalization, and complete inherited heap integrity.</returns>
     private static int CheckActiveCollection(int nativePid, int parentPid, long tokenLow, long tokenHigh,
-        delegate* unmanaged[Cdecl]<int, long, void> report)
+        delegate* unmanaged[Cdecl]<int, long, void> report, bool requireBackground = true)
     {
         GCMemoryInfo background = GC.GetGCMemoryInfo(GCKind.Background);
         report(81, background.Index);
         report(82, background.Concurrent ? 1 : 0);
-        if (background.Index <= s_activePreviousIndex || !background.Concurrent || background.Generation != GC.MaxGeneration)
+        if ((requireBackground && background.Index <= s_activePreviousIndex) ||
+            (background.Index != 0 && (!background.Concurrent || background.Generation != GC.MaxGeneration)))
         {
             return 81;
         }

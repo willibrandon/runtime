@@ -86,6 +86,7 @@ struct options
     int rounds;
     enum retained_mode retained;
     int descendants;
+    bool expect_server_gc;
 };
 
 /* All storage is allocated before fork; callback counts become independent child copies. */
@@ -208,6 +209,8 @@ emit(const char *event, int32_t marker, int64_t value)
         written += (size_t) result;
     }
 }
+
+#include "../collector-inventory.h"
 
 /* The synchronous managed callback never retains this process-lifetime native function pointer. */
 static void
@@ -696,6 +699,11 @@ invoke(run_fn run, int stage, pid_t parent, int64_t token_low, int64_t token_hig
     emit("begin", 0, stage);
     int result = run(stage, (int32_t) getpid(), (int32_t) parent, token_low, token_high, report);
     emit("result", 0, result);
+    if (!check_collector_inventory())
+    {
+        return 183;
+    }
+
     return result;
 }
 
@@ -940,6 +948,12 @@ run_worker(struct options options)
         return 2;
     }
 
+    emit("server-gc", 0, snapshot(4));
+    if (options.expect_server_gc && snapshot(4) != 1)
+    {
+        return 4;
+    }
+
     int64_t token_low = snapshot(1);
     int64_t token_high = snapshot(2);
     emit("snapshot-pid", 0, snapshot(0));
@@ -973,6 +987,12 @@ run_worker(struct options options)
             emit("atfork-error", 0, registered);
             return 70;
         }
+    }
+
+    if (options.enable &&
+        (!initialize_collector_inventory(library, snapshot(4) == 1) || !check_collector_inventory()))
+    {
+        return 180;
     }
 
     if (options.enable)
@@ -1075,7 +1095,7 @@ main(int argc, char **argv)
         return 64;
     }
 
-    struct options options = {argv[1], false, false, 2, RETAINED_NONE, 0};
+    struct options options = {argv[1], false, false, 2, RETAINED_NONE, 0, false};
     for (int argument = 2; argument < argc; argument++)
     {
         if (strcmp(argv[argument], "--minimal") == 0)
@@ -1085,6 +1105,10 @@ main(int argc, char **argv)
         else if (strcmp(argv[argument], "--enable-fork") == 0)
         {
             options.enable = true;
+        }
+        else if (strcmp(argv[argument], "--server-gc") == 0)
+        {
+            options.expect_server_gc = true;
         }
         else if (strcmp(argv[argument], "--retained-timer") == 0 && options.retained == RETAINED_NONE)
         {

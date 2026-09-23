@@ -16,6 +16,9 @@
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup Condition="'$(ForkRuntimePrototype)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkGCHeapCount" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkGCHeapCount" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkGCHeapCount" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
     <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
     <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
     <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
