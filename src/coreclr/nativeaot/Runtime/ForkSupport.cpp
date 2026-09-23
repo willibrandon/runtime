@@ -353,6 +353,39 @@ extern "C" __attribute__((visibility("default"))) int32_t RhEnableForkSupport()
     return 1;
 }
 
+#ifdef TARGET_OSX
+// Native host validation uses the same checkpoint as pthread_atfork. It must
+// release a validation-only checkpoint before allowing another managed call.
+extern "C" uint32_t RhGetPreparedForkThread()
+{
+    if (s_state.load() != ForkState::Preparing ||
+        ThreadStore::RawGetCurrentThread() != s_owner ||
+        s_acknowledged.load() != s_request.load())
+    {
+        return 0;
+    }
+
+    Thread* finalizer = s_finalizer.load();
+    return finalizer == nullptr ? 0 : pthread_mach_thread_np(finalizer->GetOSThreadHandle());
+}
+
+extern "C" uint32_t RhBeginForkValidation()
+{
+    PrepareFork();
+    return RhGetPreparedForkThread();
+}
+
+extern "C" void RhEndForkValidation()
+{
+    if (RhGetPreparedForkThread() == 0)
+    {
+        ForkFailure("NativeAOT fork prototype: validation checkpoint was not prepared.\n");
+    }
+
+    ParentAfterFork();
+}
+#endif
+
 void RhForkBeforeManagedEntry()
 {
     while (true)
