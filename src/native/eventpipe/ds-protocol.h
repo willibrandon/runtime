@@ -87,6 +87,7 @@ struct _DiagnosticsIpcMessage {
 };
 #endif
 
+DS_DEFINE_GETTER(DiagnosticsIpcMessage *, ipc_message, uint16_t, size)
 DS_DEFINE_GETTER_REF(DiagnosticsIpcMessage *, ipc_message, DiagnosticsIpcHeader *, header) // ds_ipc_message_get_header_ref
 
 DiagnosticsIpcMessage *

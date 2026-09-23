@@ -69,6 +69,7 @@ ep_file_has_errors (EventPipeFile *file)
 	return (ep_file_get_fast_serializer (file) == NULL) || ep_fast_serializer_get_write_error_encountered (ep_file_get_fast_serializer (file));
 }
 
+// Takes ownership of stream_writer on success; failure leaves it with the caller.
 EventPipeFile *
 ep_file_alloc (
 	StreamWriter *stream_writer,

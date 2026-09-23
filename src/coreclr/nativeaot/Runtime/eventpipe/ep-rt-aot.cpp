@@ -654,7 +654,8 @@ ep_rt_aot_spin_lock_alloc (ep_rt_spin_lock_handle_t *spin_lock)
     // EventPipe library will intialize using thread, EventPipeBufferManager instances and will maintain these on the EventPipe library side
 
     spin_lock->lock = new (nothrow) CrstStatic ();
-    spin_lock->lock->InitNoThrow (CrstType::CrstEventPipe);
+    if (spin_lock->lock != NULL)
+        spin_lock->lock->InitNoThrow (CrstType::CrstEventPipe);
 }
 
 void
@@ -663,6 +664,7 @@ ep_rt_aot_spin_lock_free (ep_rt_spin_lock_handle_t *spin_lock)
     STATIC_CONTRACT_NOTHROW;
 
     if (spin_lock && spin_lock->lock) {
+        spin_lock->lock->Destroy ();
         delete spin_lock->lock;
         spin_lock->lock = NULL;
     }

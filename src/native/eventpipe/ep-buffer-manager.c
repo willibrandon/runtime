@@ -865,7 +865,9 @@ ep_buffer_manager_free (EventPipeBufferManager * buffer_manager)
 {
 	ep_return_void_if_nok (buffer_manager != NULL);
 
-	ep_buffer_manager_deallocate_buffers (buffer_manager);
+	// Failed construction can reach cleanup before the list or lock exists.
+	if (buffer_manager->thread_session_state_list != NULL && ep_rt_spin_lock_is_valid (&buffer_manager->rt_lock))
+		ep_buffer_manager_deallocate_buffers (buffer_manager);
 
 	dn_list_free (buffer_manager->sequence_points);
 

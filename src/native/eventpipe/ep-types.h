@@ -93,6 +93,7 @@ EP_DEFINE_GETTER(EventPipeProviderCallbackData *, provider_callback_data, int64_
 EP_DEFINE_GETTER(EventPipeProviderCallbackData *, provider_callback_data, EventPipeEventLevel, provider_level)
 EP_DEFINE_GETTER(EventPipeProviderCallbackData *, provider_callback_data, bool, enabled)
 EP_DEFINE_GETTER(EventPipeProviderCallbackData *, provider_callback_data, EventPipeSessionID, session_id)
+EP_DEFINE_GETTER(EventPipeProviderCallbackData *, provider_callback_data, EventPipeProvider *, provider)
 
 EventPipeProviderCallbackData *
 ep_provider_callback_data_alloc (
@@ -148,7 +149,7 @@ struct _EventPipeProviderCallbackDataQueue {
 #else
 struct _EventPipeProviderCallbackDataQueue_Internal {
 #endif
-	dn_queue_t *queue;
+	dn_queue_t queue;
 };
 
 #if !defined(EP_INLINE_GETTER_SETTER) && !defined(EP_IMPL_EP_GETTER_SETTER)
@@ -157,7 +158,7 @@ struct _EventPipeProviderCallbackDataQueue {
 };
 #endif
 
-EP_DEFINE_GETTER(EventPipeProviderCallbackDataQueue *, provider_callback_data_queue, dn_queue_t *, queue)
+EP_DEFINE_GETTER_REF(EventPipeProviderCallbackDataQueue *, provider_callback_data_queue, dn_queue_t *, queue)
 
 EventPipeProviderCallbackDataQueue *
 ep_provider_callback_data_queue_init (EventPipeProviderCallbackDataQueue *provider_callback_data_queue);

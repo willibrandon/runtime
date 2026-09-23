@@ -189,6 +189,8 @@ ep_enable_2 (
 	EventPipeSessionSynchronousCallback sync_callback,
 	void *callback_additional_data);
 
+// On success the session owns options->stream and options->user_events_data_fd.
+// Failure leaves both resources owned by the caller.
 EventPipeSessionID
 ep_enable_3 (
 	const EventPipeSessionOptions *options

@@ -594,7 +594,7 @@ ep_ipc_stream_writer_alloc (
 		&instance->stream_writer,
 		&ipc_stream_writer_vtable) != NULL);
 
-	//Ownership transferred.
+	// Borrowed from the session, which owns the continuation stream.
 	instance->ipc_stream = stream;
 
 ep_on_exit:
@@ -611,7 +611,6 @@ ep_ipc_stream_writer_free (IpcStreamWriter *ipc_stream_writer)
 {
 	ep_return_void_if_nok (ipc_stream_writer != NULL);
 
-	ep_ipc_stream_free_vcall (ipc_stream_writer->ipc_stream);
 	ep_stream_writer_fini (&ipc_stream_writer->stream_writer);
 	ep_rt_object_free (ipc_stream_writer);
 }

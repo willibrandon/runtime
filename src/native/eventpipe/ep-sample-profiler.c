@@ -213,11 +213,12 @@ sample_profiler_enable (void)
 	ep_rt_sample_profiler_session_enabled ();
 }
 
-void
+bool
 ep_sample_profiler_init (EventPipeProviderCallbackDataQueue *provider_callback_data_queue)
 {
 	ep_requires_lock_held ();
 
+	bool result = false;
 	if (!_sampling_provider) {
 		_sampling_provider = provider_create_register (ep_config_get_sample_profiler_provider_name_utf8 (), NULL, NULL, provider_callback_data_queue);
 		ep_raise_error_if_nok (_sampling_provider != NULL);
@@ -233,12 +234,16 @@ ep_sample_profiler_init (EventPipeProviderCallbackDataQueue *provider_callback_d
 		ep_raise_error_if_nok (_thread_time_event != NULL);
 	}
 
+	result = true;
+
 ep_on_exit:
 	ep_requires_lock_held ();
-	return;
+	return result;
 
 ep_on_error:
-
+	provider_unregister_delete (_sampling_provider);
+	_sampling_provider = NULL;
+	_thread_time_event = NULL;
 	ep_exit_error_handler ();
 }
 

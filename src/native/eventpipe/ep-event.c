@@ -83,6 +83,7 @@ ep_event_alloc (
 	} else {
 		// if metadata is not provided, we have to build the minimum version. It's required by the serialization contract.
 		event_build_minimum_metadata (instance, &(instance->metadata), &(instance->metadata_len));
+		ep_raise_error_if_nok (instance->metadata != NULL && instance->metadata_len > 0);
 	}
 
 ep_on_exit:

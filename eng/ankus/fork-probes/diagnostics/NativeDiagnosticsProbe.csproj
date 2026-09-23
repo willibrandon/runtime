@@ -32,4 +32,15 @@
     <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_diagnostics_shutdown" />
   </ItemGroup>
+  <ItemGroup Condition="'$(ProbeAllocationFailures)' == 'true'">
+    <NativeLibrary Include="$(MSBuildProjectDirectory)/obj/ownership.o" />
+    <LinkerArg Include="-Wl,--wrap=_ZnwmRKSt9nothrow_t" />
+    <LinkerArg Include="-Wl,--wrap=_ZnamRKSt9nothrow_t" />
+    <LinkerArg Include="-Wl,--wrap=calloc" />
+    <LinkerArg Include="-Wl,--wrap=malloc" />
+    <LinkerArg Include="-Wl,--wrap=realloc" />
+    <LinkerArg Include="-Wl,--wrap=strdup" />
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_trace_ownership" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_trace_ownership" />
+  </ItemGroup>
 </Project>

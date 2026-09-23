@@ -16,7 +16,7 @@
  * EventPipeSampleProfiler.
  */
 
-void
+bool
 ep_sample_profiler_init (EventPipeProviderCallbackDataQueue *provider_callback_data_queue);
 
 void

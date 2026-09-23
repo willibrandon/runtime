@@ -538,6 +538,7 @@ ep_session_provider_list_alloc (
 {
 	ep_return_null_if_nok ((configs_len == 0) || (configs_len > 0 && configs != NULL));
 
+	EventPipeSessionProvider *session_provider = NULL;
 	EventPipeSessionProviderList *instance = ep_rt_object_alloc (EventPipeSessionProviderList);
 	ep_raise_error_if_nok (instance != NULL);
 
@@ -558,14 +559,16 @@ ep_session_provider_list_alloc (
 			ep_raise_error_if_nok (instance->catch_all_provider != NULL);
 		}
 		else {
-			EventPipeSessionProvider * session_provider = ep_session_provider_alloc (
+			session_provider = ep_session_provider_alloc (
 				ep_provider_config_get_provider_name (config),
 				ep_provider_config_get_keywords (config),
 				ep_provider_config_get_logging_level (config),
 				ep_provider_config_get_filter_data (config),
 				ep_provider_config_get_event_filter (config),
 				ep_provider_config_get_tracepoint_config (config));
+			ep_raise_error_if_nok (session_provider != NULL);
 			ep_raise_error_if_nok (dn_list_push_back (instance->providers, session_provider));
+			session_provider = NULL;
 		}
 	}
 
@@ -573,6 +576,7 @@ ep_on_exit:
 	return instance;
 
 ep_on_error:
+	ep_session_provider_free (session_provider);
 	ep_session_provider_list_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();

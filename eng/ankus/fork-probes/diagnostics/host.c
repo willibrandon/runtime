@@ -21,6 +21,7 @@ typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
 typedef int (*connect_fn)(const char*, uint32_t);
 typedef uint32_t (*listener_fn)(bool);
 typedef uint64_t (*pending_response_fn)(void);
+typedef int (*trace_ownership_fn)(int, int, uint64_t*);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -79,6 +80,8 @@ main(int argc, char **argv)
     {
         return 71;
     }
+
+    trace_ownership_fn trace_ownership = (trace_ownership_fn) dlsym(library, "ankus_probe_trace_ownership");
 
     printf("ready %d\n", (int) getpid());
     fflush(stdout);
@@ -173,6 +176,25 @@ main(int argc, char **argv)
             }
 
             printf("connect-complete %d\n", connect_client(path, timeout));
+        }
+        else if (command[0] == 'b')
+        {
+            int kind;
+            int failure_index;
+            uint64_t observations[6] = {0};
+            if (trace_ownership == NULL || sscanf(command + 1, "%d %d", &kind, &failure_index) != 2)
+            {
+                return 76;
+            }
+
+            int result = trace_ownership(kind, failure_index, observations);
+            printf("ownership %d", result);
+            for (int index = 0; index < 6; index++)
+            {
+                printf(" %llu", (unsigned long long) observations[index]);
+            }
+
+            printf("\n");
         }
         else if (command[0] == 'i')
         {

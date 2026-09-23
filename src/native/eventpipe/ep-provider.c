@@ -373,6 +373,22 @@ provider_unset_config (
 }
 
 void
+provider_complete_callback (EventPipeProviderCallbackData *provider_callback_data)
+{
+	EP_ASSERT (provider_callback_data != NULL);
+
+	ep_requires_lock_held ();
+
+	if (ep_provider_callback_data_get_callback_function (provider_callback_data) != NULL) {
+		EventPipeProvider *provider = ep_provider_callback_data_get_provider (provider_callback_data);
+		EP_ASSERT (provider->callbacks_pending > 0);
+		provider->callbacks_pending--;
+		if (provider->callbacks_pending == 0 && provider->callback_func == NULL)
+			ep_rt_wait_event_set (&provider->callbacks_complete_event);
+	}
+}
+
+void
 provider_invoke_callback (EventPipeProviderCallbackData *provider_callback_data)
 {
 	EP_ASSERT (provider_callback_data != NULL);
@@ -445,15 +461,7 @@ provider_invoke_callback (EventPipeProviderCallbackData *provider_callback_data)
 
 	// The callback completed, can take the lock again.
 	EP_LOCK_ENTER (section1)
-		if (callback_function != NULL) {
-			EventPipeProvider *provider = provider_callback_data->provider;
-			provider->callbacks_pending--;
-			if (provider->callbacks_pending == 0 && provider->callback_func == NULL) {
-				// ep_delete_provider deferred provider deletion and is waiting for all in-flight callbacks
-				// to complete. This is the last callback, so signal completion.
-				ep_rt_wait_event_set (&provider->callbacks_complete_event);
-			}
-		}
+		provider_complete_callback (provider_callback_data);
 	EP_LOCK_EXIT (section1)
 
 ep_on_exit:

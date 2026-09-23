@@ -303,6 +303,7 @@ ep_session_alloc (
 	EventPipeSession *instance = ep_rt_object_alloc (EventPipeSession);
 	ep_raise_error_if_nok (instance != NULL);
 	ep_session_inc_ref (instance);
+	instance->user_events_data_fd = -1;
 
 	instance->providers = ep_session_provider_list_alloc (providers, providers_len);
 	ep_raise_error_if_nok (instance->providers != NULL);
@@ -346,6 +347,7 @@ ep_session_alloc (
 	case EP_SESSION_TYPE_IPCSTREAM:
 		ipc_stream_writer = ep_ipc_stream_writer_alloc ((uint64_t)instance, stream);
 		ep_raise_error_if_nok (ipc_stream_writer != NULL);
+		instance->stream = stream;
 		instance->file = ep_file_alloc (ep_ipc_stream_writer_get_stream_writer_ref (ipc_stream_writer), format);
 		ep_raise_error_if_nok (instance->file != NULL);
 		ipc_stream_writer = NULL;
@@ -440,14 +442,25 @@ ep_session_dec_ref (EventPipeSession *session)
 
 	ep_rt_wait_event_free (&session->rt_thread_shutdown_event);
 
+	session_disable_user_events (session);
 	ep_session_provider_list_free (session->providers);
 
 	ep_buffer_manager_free (session->buffer_manager);
 	ep_file_free (session->file);
+	if (session->owns_ipc_resources)
+		ep_ipc_stream_free_vcall (session->stream);
 
 	ep_session_remove_dangling_session_states (session);
 
 	ep_rt_object_free (session);
+}
+
+void
+ep_session_adopt_ipc_resources (EventPipeSession *session)
+{
+	ep_requires_lock_held ();
+	EP_ASSERT (session != NULL && !session->owns_ipc_resources);
+	session->owns_ipc_resources = true;
 }
 
 EventPipeSessionProvider *
@@ -671,7 +684,8 @@ session_disable_user_events (EventPipeSession *session)
 	} DN_LIST_FOREACH_END;
 
 #if HAVE_UNISTD_H
-	close (session->user_events_data_fd);
+	if (session->owns_ipc_resources)
+		close (session->user_events_data_fd);
 #endif // HAVE_UNISTD_H
 	session->user_events_data_fd = -1;
 }

@@ -9,6 +9,10 @@
 #include "ep.h"
 #include "ds-rt.h"
 
+#if HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
 /*
  * Forward declares of all static functions.
  */
@@ -642,6 +646,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -678,6 +685,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -713,6 +723,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -748,6 +761,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -807,6 +823,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -863,8 +882,9 @@ eventpipe_protocol_helper_stop_tracing (
 	ep_return_false_if_nok (message != NULL && stream != NULL);
 
 	bool result = false;
-	EventPipeStopTracingCommandPayload *payload;
-	payload = (EventPipeStopTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, NULL);
+	EventPipeStopTracingCommandPayload *payload = NULL;
+	if (ds_ipc_message_get_size (message) == sizeof (DiagnosticsIpcHeader) + sizeof (uint64_t))
+		payload = (EventPipeStopTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, NULL);
 
 	if (!payload) {
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
@@ -898,6 +918,7 @@ eventpipe_protocol_helper_collect_tracing (
 
 	if (!payload) {
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
+		ds_ipc_stream_free (stream);
 		return false;
 	}
 
@@ -905,6 +926,8 @@ eventpipe_protocol_helper_collect_tracing (
 	if (payload->session_type == EP_SESSION_TYPE_USEREVENTS) {
 		if (!ds_ipc_stream_read_fd (stream, &user_events_data_fd)) {
 			ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
+			ds_eventpipe_collect_tracing_command_payload_free (payload);
+			ds_ipc_stream_free (stream);
 			return false;
 		}
 	}
@@ -933,7 +956,11 @@ eventpipe_protocol_helper_collect_tracing (
 		ds_ipc_message_send_error (stream, DS_IPC_E_FAIL);
 		ep_raise_error ();
 	} else {
-		eventpipe_protocol_helper_send_start_tracing_success (stream, session_id);
+		if (!eventpipe_protocol_helper_send_start_tracing_success (stream, session_id)) {
+			ep_disable (session_id);
+			goto ep_on_exit;
+		}
+
 		ep_start_streaming (session_id);
 	}
 
@@ -946,6 +973,10 @@ ep_on_exit:
 
 ep_on_error:
 	EP_ASSERT (!result);
+#if HAVE_UNISTD_H
+	if (user_events_data_fd != -1)
+		close (user_events_data_fd);
+#endif
 	ds_ipc_stream_free (stream);
 	ep_exit_error_handler ();
 }

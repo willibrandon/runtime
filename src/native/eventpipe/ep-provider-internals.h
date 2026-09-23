@@ -41,6 +41,11 @@ provider_unset_config (
 void
 provider_invoke_callback (EventPipeProviderCallbackData *provider_callback_data);
 
+// Complete bookkeeping when a prepared callback cannot be queued.
+// _Requires_lock_held (ep)
+void
+provider_complete_callback (EventPipeProviderCallbackData *provider_callback_data);
+
 // Create and register provider.
 // _Requires_lock_held (ep)
 EventPipeProvider *

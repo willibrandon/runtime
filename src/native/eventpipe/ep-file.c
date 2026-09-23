@@ -328,7 +328,6 @@ ep_file_alloc (
 		file_get_file_minimum_version (format),
 		format >= EP_SERIALIZATION_FORMAT_NETTRACE_V4) != NULL);
 
-	instance->stream_writer = stream_writer;
 	instance->format = format;
 
 	instance->event_block = ep_event_block_alloc (100 * 1024, format);
@@ -369,6 +368,9 @@ ep_file_alloc (
 	instance->last_sorted_timestamp = ep_perf_timestamp_get ();
 #endif
 
+	// Transfer ownership only after every allocation has succeeded.
+	instance->stream_writer = stream_writer;
+
 ep_on_exit:
 	return instance;
 
@@ -393,9 +395,8 @@ ep_file_free (EventPipeFile *file)
 	dn_umap_free (file->metadata_ids);
 	dn_umap_free (file->stack_hash);
 
-	// If file has not been initialized, stream_writer ownership
-	// have not been passed along and needs to be freed by file.
-	if (ep_rt_volatile_load_uint32_t (&file->initialized) == 0)
+	// Until a serializer is allocated, the file owns the writer.
+	if (file->fast_serializer == NULL)
 		ep_stream_writer_free_vcall (file->stream_writer);
 
 	ep_fast_serializable_object_fini (&file->fast_serializable_object);
@@ -418,13 +419,19 @@ ep_file_initialize_file (EventPipeFile *file)
 	}
 
 	if (success) {
-		ep_rt_volatile_store_uint32_t (&file->initialized, 1);
 		// Create the file stream and write the FastSerialization header.
 		file->fast_serializer = ep_fast_serializer_alloc (file->stream_writer);
 
 		// Write the first object to the file.
-		if (file->fast_serializer)
+		if (file->fast_serializer) {
 			ep_fast_serializer_write_object (file->fast_serializer, (FastSerializableObject *)file);
+			success = !ep_fast_serializer_get_write_error_encountered (file->fast_serializer);
+		} else {
+			success = false;
+		}
+
+		if (success)
+			ep_rt_volatile_store_uint32_t (&file->initialized, 1);
 	}
 
 	return success;
