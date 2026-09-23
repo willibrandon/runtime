@@ -93,8 +93,11 @@ extern "C" bool RhPrepareServerGCForFork(IGCHeap* heap, uint32_t timeoutMillisec
 }
 
 extern "C" bool RhIsServerGCReadyForFork() { return s_forkGCReady.load(); }
+
 extern "C" bool RhResumeServerGCForFork() { return gc_heap::resume_after_fork(); }
+
 extern "C" uint64_t RhGetServerForkGCActiveObservationCount() { return s_forkGCActiveObservations.load(); }
+
 extern "C" int32_t RhGetServerForkGCHeapCount(bool maximum) { return gc_heap::fork_heap_count(maximum); }
 #else
 #ifdef FEATURE_SVR_GC

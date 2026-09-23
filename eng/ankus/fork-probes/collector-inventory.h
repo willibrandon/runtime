@@ -72,6 +72,7 @@ count_named_threads(const char *expected_name)
         {
             length = read(name, buffer, sizeof(buffer) - 1);
         } while (length < 0 && errno == EINTR);
+
         int read_error = errno;
         close(name);
         if (length < 0 && read_error != ESRCH)
