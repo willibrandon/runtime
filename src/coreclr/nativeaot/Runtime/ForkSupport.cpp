@@ -98,7 +98,7 @@ namespace
         Thread* caller = ThreadStore::RawGetCurrentThread();
         if (caller != s_owner || !caller->IsAtNativeTopOfStackForFork())
         {
-            ForkFailure("NativeAOT fork prototype: fork requires the enabled native caller outside managed frames.\n");
+            ForkFailure("NativeAOT fork support: fork requires the enabled native caller outside managed frames.\n");
         }
 
         // A native child may fork again before its first managed entry. Complete
@@ -113,22 +113,22 @@ namespace
         ForkState expected = ForkState::Idle;
         if (!s_state.compare_exchange_strong(expected, ForkState::PreparingManaged))
         {
-            ForkFailure("NativeAOT fork prototype: overlapping or incomplete fork checkpoint.\n");
+            ForkFailure("NativeAOT fork support: overlapping or incomplete fork checkpoint.\n");
         }
 
         // Keep ordinary admission open while framework workers retire. Their managed
         // thread-exit callbacks must run before native ThreadStore removal can finish.
         InvokeServiceCallback(s_prepareServices,
-            "NativeAOT fork prototype: managed service preparation failed.\n");
+            "NativeAOT fork support: managed service preparation failed.\n");
 
         if (!EventPipe_PrepareForFork())
         {
-            ForkFailure("NativeAOT fork prototype: diagnostics preparation failed.\n");
+            ForkFailure("NativeAOT fork support: diagnostics preparation failed.\n");
         }
 
         if (!RhPrepareGCForFork(GCHeapUtilities::GetGCHeap(), 30000))
         {
-            ForkFailure("NativeAOT fork prototype: GC did not retire its collectors.\n");
+            ForkFailure("NativeAOT fork support: GC did not retire its collectors.\n");
         }
 
         ThreadStore* store = GetThreadStore();
@@ -153,7 +153,7 @@ namespace
 
             if (++attempts == 10000)
             {
-                ForkFailure("NativeAOT fork prototype: managed service threads did not detach.\n");
+                ForkFailure("NativeAOT fork support: managed service threads did not detach.\n");
             }
 
             PalSleep(1);
@@ -162,7 +162,7 @@ namespace
         uint32_t request = s_request.fetch_add(1) + 1;
         if (request == 0)
         {
-            ForkFailure("NativeAOT fork prototype: checkpoint sequence exhausted.\n");
+            ForkFailure("NativeAOT fork support: checkpoint sequence exhausted.\n");
         }
 
         RhEnableFinalization();
@@ -171,7 +171,7 @@ namespace
         {
             if (++attempts == 10000)
             {
-                ForkFailure("NativeAOT fork prototype: finalizer did not reach its idle checkpoint.\n");
+                ForkFailure("NativeAOT fork support: finalizer did not reach its idle checkpoint.\n");
             }
 
             PalSleep(1);
@@ -192,7 +192,7 @@ namespace
         store->UnlockThreadStore();
         if (!supported)
         {
-            ForkFailure("NativeAOT fork prototype: checkpoint requires only caller/finalizer and fully retired collectors.\n");
+            ForkFailure("NativeAOT fork support: checkpoint requires only caller/finalizer and fully retired collectors.\n");
         }
 
         // Admission remains closed and the only other runtime thread is parked outside
@@ -209,16 +209,16 @@ namespace
         s_state.store(ForkState::ParentResuming);
         if (!RhResumeGCForFork())
         {
-            ForkFailure("NativeAOT fork prototype: parent GC resume failed.\n");
+            ForkFailure("NativeAOT fork support: parent GC resume failed.\n");
         }
 
         if (!EventPipe_ResumeParentAfterFork())
         {
-            ForkFailure("NativeAOT fork prototype: parent diagnostics resume failed.\n");
+            ForkFailure("NativeAOT fork support: parent diagnostics resume failed.\n");
         }
 
         InvokeServiceCallback(s_resumeParentServices,
-            "NativeAOT fork prototype: managed parent service resume failed.\n");
+            "NativeAOT fork support: managed parent service resume failed.\n");
         s_state.store(ForkState::Idle);
     }
 
@@ -230,7 +230,7 @@ namespace
         s_inheritedFinalizer = nullptr;
         if (!GetThreadStore()->RefreshCallerAfterFork(s_owner))
         {
-            ForkFailure("NativeAOT fork prototype: failed to restore child thread identity.\n");
+            ForkFailure("NativeAOT fork support: failed to restore child thread identity.\n");
         }
 
         s_finalizer.store(nullptr);
@@ -242,7 +242,7 @@ namespace
     {
         if (ThreadStore::RawGetCurrentThread() != s_owner)
         {
-            ForkFailure("NativeAOT fork prototype: child recovery must run on the forking thread.\n");
+            ForkFailure("NativeAOT fork support: child recovery must run on the forking thread.\n");
         }
 
         s_state.store(ForkState::ChildRepair);
@@ -253,16 +253,16 @@ namespace
         // Repair shared managed service state before inherited finalizable objects
         // can observe it. This callback must not start or join framework workers.
         InvokeServiceCallback(s_resetChildServices,
-            "NativeAOT fork prototype: managed child service reset failed.\n");
+            "NativeAOT fork support: managed child service reset failed.\n");
 
         if (!EventPipe_ResetChildAfterFork())
         {
-            ForkFailure("NativeAOT fork prototype: child diagnostics reset failed.\n");
+            ForkFailure("NativeAOT fork support: child diagnostics reset failed.\n");
         }
 
         if (!RhRestartFinalizationAfterFork())
         {
-            ForkFailure("NativeAOT fork prototype: failed to restart child finalization.\n");
+            ForkFailure("NativeAOT fork support: failed to restart child finalization.\n");
         }
 
         // The inherited worker can consume a wake immediately before parking.
@@ -274,16 +274,16 @@ namespace
         s_state.store(ForkState::ChildResuming);
         if (!RhResumeGCForFork())
         {
-            ForkFailure("NativeAOT fork prototype: child GC resume failed.\n");
+            ForkFailure("NativeAOT fork support: child GC resume failed.\n");
         }
 
         if (!EventPipe_ResumeChildAfterFork())
         {
-            ForkFailure("NativeAOT fork prototype: child diagnostics resume failed.\n");
+            ForkFailure("NativeAOT fork support: child diagnostics resume failed.\n");
         }
 
         InvokeServiceCallback(s_resumeChildServices,
-            "NativeAOT fork prototype: managed child service resume failed.\n");
+            "NativeAOT fork support: managed child service resume failed.\n");
         s_state.store(ForkState::Idle);
     }
 }
@@ -300,7 +300,7 @@ extern "C" int32_t RhTryEnterForkWork()
 
         if ((observed & WorkCountMask) == WorkCountMask)
         {
-            ForkFailure("NativeAOT fork prototype: callback accounting overflowed.\n");
+            ForkFailure("NativeAOT fork support: callback accounting overflowed.\n");
         }
     } while (!s_work.compare_exchange_weak(observed, observed + 1));
 
@@ -315,7 +315,7 @@ extern "C" void RhExitForkWork()
     {
         if ((observed & WorkCountMask) == 0 || (observed & WorkRetired) != 0)
         {
-            ForkFailure("NativeAOT fork prototype: callback accounting underflowed.\n");
+            ForkFailure("NativeAOT fork support: callback accounting underflowed.\n");
         }
 
         updated = observed - 1;
@@ -356,7 +356,7 @@ extern "C" void RhResumeForkWork()
     uint32_t expected = WorkPreparing | WorkRetired;
     if (!s_work.compare_exchange_strong(expected, 0))
     {
-        ForkFailure("NativeAOT fork prototype: callback resume requires completed retirement.\n");
+        ForkFailure("NativeAOT fork support: callback resume requires completed retirement.\n");
     }
 }
 
@@ -485,7 +485,7 @@ extern "C" void RhEndForkValidation()
 {
     if (RhGetPreparedForkThread() == 0)
     {
-        ForkFailure("NativeAOT fork prototype: validation checkpoint was not prepared.\n");
+        ForkFailure("NativeAOT fork support: validation checkpoint was not prepared.\n");
     }
 
     ParentAfterFork();
@@ -546,7 +546,7 @@ void RhForkThreadShutdownStarted()
 {
     if (s_threadShutdowns.fetch_add(1) == UINT32_MAX)
     {
-        ForkFailure("NativeAOT fork prototype: thread shutdown accounting overflowed.\n");
+        ForkFailure("NativeAOT fork support: thread shutdown accounting overflowed.\n");
     }
 }
 
@@ -554,7 +554,7 @@ void RhForkThreadShutdownCompleted()
 {
     if (s_threadShutdowns.fetch_sub(1) == 0)
     {
-        ForkFailure("NativeAOT fork prototype: thread shutdown accounting underflowed.\n");
+        ForkFailure("NativeAOT fork support: thread shutdown accounting underflowed.\n");
     }
 }
 
