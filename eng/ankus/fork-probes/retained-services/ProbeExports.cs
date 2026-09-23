@@ -98,6 +98,59 @@ public static unsafe class ProbeExports
         };
 
     /// <summary>
+    /// Checks inherited mutations and changes them only in the current process across successive generations.
+    /// </summary>
+    /// <param name="nativePid">The current native process identifier.</param>
+    /// <param name="parentPid">The process that originally initialized the graph.</param>
+    /// <param name="tokenLow">The original token's first word.</param>
+    /// <param name="tokenHigh">The original token's second word.</param>
+    /// <param name="expected">The graph marker inherited from the immediate ancestor.</param>
+    /// <param name="replacement">The next process-local graph marker.</param>
+    /// <param name="report">Reports actual graph and process values to the native host.</param>
+    /// <returns>Zero only when identity, every array value, and the original initialization remain intact.</returns>
+    [UnmanagedCallersOnly(EntryPoint = "fork_probe_lineage", CallConvs = [typeof(CallConvCdecl)])]
+    public static int Lineage(int nativePid, int parentPid, long tokenLow, long tokenHigh,
+        int expected, int replacement, delegate* unmanaged[Cdecl]<int, long, void> report)
+    {
+        try
+        {
+            GraphNode root = s_graph["root"];
+            report(70, root.Marker);
+            report(71, Environment.ProcessId);
+            if (s_initializations != 1 || s_parentPid != parentPid || s_managedPidSnapshot != parentPid ||
+                Environment.ProcessId != nativePid || TokenWord(0) != tokenLow || TokenWord(1) != tokenHigh ||
+                root.Marker != expected || !ReferenceEquals(root, root.Next) ||
+                !s_rootHandle.IsAllocated || !ReferenceEquals(root, s_rootHandle.Target))
+            {
+                return 70;
+            }
+
+            for (int index = 0; index < s_numbers.Length; index++)
+            {
+                if (s_numbers[index] != index * 7 + expected - 14)
+                {
+                    return 71;
+                }
+            }
+
+            root.Marker = replacement;
+            for (int index = 0; index < s_numbers.Length; index++)
+            {
+                s_numbers[index] = index * 7 + replacement - 14;
+            }
+
+            report(72, root.Marker);
+            report(73, s_initializations);
+            return 0;
+        }
+        catch (Exception error)
+        {
+            report(900, error.HResult);
+            return 90;
+        }
+    }
+
+    /// <summary>
     /// Runs one independent observation, returning errors to native code without allowing an exception to escape.
     /// </summary>
     /// <param name="stage">Graph, PID, collection/finalization, thread pool, timer, or exception stage.</param>

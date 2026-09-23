@@ -23,6 +23,20 @@ The timer must be unfired at the native checkpoint and fire once in each process
 The queue must still contain original objects from both local and global queues;
 all original items must complete once with exact values in each process.
 
+The same host checks successive generations:
+
+```sh
+./host "$PWD/publish/NativeForkProbe.so" --descendants --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --descendants-pending --enable-fork
+```
+
+The first case runs managed code in the child before it forks grandchildren.
+The second forks before the child's first managed call, while recovery is still
+pending. Both run two child processes with two grandchildren each. They check
+inherited graph mutations, object and GC-handle identity, the original initializer
+token, current process identity, collections, finalizers, pool work, timers and
+exceptions. Each ancestor must retain its own values after its descendants exit.
+
 From `active-gc`:
 
 ```sh

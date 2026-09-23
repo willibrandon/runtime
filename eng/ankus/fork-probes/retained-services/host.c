@@ -19,6 +19,9 @@ typedef int64_t (*snapshot_fn)(int32_t field);
 typedef int32_t (*run_fn)(int32_t stage, int32_t native_pid, int32_t parent_pid,
                          int64_t token_low, int64_t token_high, report_fn report);
 typedef int32_t (*enable_fn)(void);
+typedef int32_t (*lineage_fn)(int32_t native_pid, int32_t parent_pid,
+                             int64_t token_low, int64_t token_high, int32_t expected,
+                             int32_t replacement, report_fn report);
 typedef int64_t (*control_fn)(int32_t command, int32_t index, int64_t value);
 typedef int32_t (*retained_prepare_fn)(int32_t mode, int32_t round, control_fn control, report_fn report);
 typedef int32_t (*retained_run_fn)(int32_t mode, int32_t round, int32_t native_pid,
@@ -65,6 +68,7 @@ struct options
     bool enable;
     int rounds;
     enum retained_mode retained;
+    int descendants;
 };
 
 /* All storage is allocated before fork; callback counts become independent child copies. */
@@ -460,6 +464,145 @@ invoke(run_fn run, int stage, pid_t parent, int64_t token_low, int64_t token_hig
     return result;
 }
 
+/* Validates copied mutations without replaying initialization or sharing writable managed objects. */
+static int
+check_lineage(lineage_fn lineage, pid_t parent, int64_t token_low, int64_t token_high,
+              int expected, int replacement, const char *role)
+{
+    current_role = role;
+    current_stage = "lineage";
+    emit("begin", expected, replacement);
+    int result = lineage((int32_t) getpid(), (int32_t) parent, token_low, token_high,
+                         expected, replacement, report);
+    emit("result", 0, result);
+    return result;
+}
+
+/* Exercises replacement finalizers, fresh pool workers, timers, process identity, and exceptions. */
+static int
+check_services(run_fn run, pid_t parent, int64_t token_low, int64_t token_high, const char *role)
+{
+    for (int stage = 2; stage <= 6; stage++)
+    {
+        if (invoke(run, stage, parent, token_low, token_high, role) != 0)
+        {
+            return 1;
+        }
+    }
+
+    return 0;
+}
+
+/* Mode two forks a grandchild before the child's first managed call; mode one repairs and warms first. */
+static int
+run_descendant_child(int mode, lineage_fn lineage, run_fn run, pid_t parent,
+                     int64_t token_low, int64_t token_high)
+{
+    int expected = 17;
+    if (mode == 1)
+    {
+        if (check_lineage(lineage, parent, token_low, token_high, 17, 131, "child-warm") != 0 ||
+            check_services(run, parent, token_low, token_high, "child-warm") != 0)
+        {
+            return 1;
+        }
+
+        expected = 131;
+    }
+
+    for (int sibling = 0; sibling < 2; sibling++)
+    {
+        current_role = "child";
+        current_stage = "grandchild-fork";
+        emit("before-native-fork", mode, sibling);
+        pid_t grandchild = fork();
+        if (grandchild < 0)
+        {
+            emit("fork-error", 0, errno);
+            return 70;
+        }
+
+        if (grandchild == 0)
+        {
+            int replacement = 997 + sibling;
+            int result = check_lineage(lineage, parent, token_low, token_high,
+                                       expected, replacement, "grandchild");
+            if (result == 0)
+            {
+                result = check_services(run, parent, token_low, token_high, "grandchild");
+            }
+
+            if (result == 0)
+            {
+                result = check_lineage(lineage, parent, token_low, token_high,
+                                       replacement, replacement, "grandchild-after-gc");
+            }
+
+            _exit(result == 0 ? 0 : 1);
+        }
+
+        int result = wait_bounded(grandchild, 12, false);
+        emit("grandchild-status", sibling, result);
+        if (result != 0 ||
+            check_lineage(lineage, parent, token_low, token_high, expected, 131, "child-after-grandchild") != 0 ||
+            check_services(run, parent, token_low, token_high, "child-after-grandchild") != 0)
+        {
+            return 1;
+        }
+
+        expected = 131;
+    }
+
+    return 0;
+}
+
+/* Two siblings and two independent child generations catch stale recovery state and parent corruption. */
+static int
+run_descendants(struct options options, void *library, run_fn run, pid_t parent,
+                int64_t token_low, int64_t token_high)
+{
+    lineage_fn lineage = (lineage_fn) dlsym(library, "fork_probe_lineage");
+    if (lineage == NULL)
+    {
+        emit("missing-export", 0, 3);
+        return 70;
+    }
+
+    for (int round = 1; round <= options.rounds; round++)
+    {
+        current_round = round;
+        current_role = "parent";
+        current_stage = "child-fork";
+        emit("before-native-fork", options.descendants, 0);
+        pid_t child = fork();
+        if (child < 0)
+        {
+            emit("fork-error", 0, errno);
+            return 70;
+        }
+
+        if (child == 0)
+        {
+            _exit(run_descendant_child(options.descendants, lineage, run, parent,
+                                       token_low, token_high));
+        }
+
+        int result = wait_bounded(child, 35, false);
+        emit("child-status", 0, result);
+        if (result != 0 ||
+            check_lineage(lineage, parent, token_low, token_high, 17, 17, "parent-after-descendants") != 0 ||
+            check_services(run, parent, token_low, token_high, "parent-after-descendants") != 0)
+        {
+            return 1;
+        }
+    }
+
+    current_role = "parent";
+    current_stage = "summary";
+    emit("failures", 0, 0);
+    return 0;
+}
+
 /* Forks only after a complete original setup; incomplete pending snapshots are failures, never skips. */
 static int
 run_retained(struct options options, retained_prepare_fn prepare, retained_run_fn run, pid_t parent)
@@ -627,6 +770,11 @@ run_worker(struct options options)
         return run_retained(options, retained_prepare, retained_run, parent);
     }
 
+    if (options.descendants != 0)
+    {
+        return run_descendants(options, library, run, parent, token_low, token_high);
+    }
+
     int failures = 0;
     for (int round = 1; round <= options.rounds; round++)
     {
@@ -691,7 +839,7 @@ main(int argc, char **argv)
         return 64;
     }
 
-    struct options options = {argv[1], false, false, 2, RETAINED_NONE};
+    struct options options = {argv[1], false, false, 2, RETAINED_NONE, 0};
     for (int argument = 2; argument < argc; argument++)
     {
         if (strcmp(argv[argument], "--minimal") == 0)
@@ -710,6 +858,14 @@ main(int argc, char **argv)
         {
             options.retained = RETAINED_QUEUE;
         }
+        else if (strcmp(argv[argument], "--descendants") == 0 && options.descendants == 0)
+        {
+            options.descendants = 1;
+        }
+        else if (strcmp(argv[argument], "--descendants-pending") == 0 && options.descendants == 0)
+        {
+            options.descendants = 2;
+        }
         else
         {
             emit("usage-error", 0, 64);
@@ -718,6 +874,12 @@ main(int argc, char **argv)
     }
 
     if (options.retained != RETAINED_NONE && !options.enable)
+    {
+        emit("usage-error", 0, 64);
+        return 64;
+    }
+
+    if (options.descendants != 0 && (!options.enable || options.minimal || options.retained != RETAINED_NONE))
     {
         emit("usage-error", 0, 64);
         return 64;

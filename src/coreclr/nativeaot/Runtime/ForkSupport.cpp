@@ -88,18 +88,29 @@ namespace
         return result;
     }
 
+    void CompleteChildRecovery();
+
     void PrepareFork()
     {
+        Thread* caller = ThreadStore::RawGetCurrentThread();
+        if (caller != s_owner || !caller->IsAtNativeTopOfStackForFork())
+        {
+            ForkFailure("NativeAOT fork prototype: fork requires the enabled native caller outside managed frames.\n");
+        }
+
+        // A native child may fork again before its first managed entry. Complete
+        // its inherited retirement before preparing a fresh checkpoint, exactly
+        // as managed reentry would. Parent and grandchild then each inherit the
+        // new finalizer snapshot and a fully retired set of framework services.
+        if (s_state.load() == ForkState::ChildPending)
+        {
+            CompleteChildRecovery();
+        }
+
         ForkState expected = ForkState::Idle;
         if (!s_state.compare_exchange_strong(expected, ForkState::PreparingManaged))
         {
             ForkFailure("NativeAOT fork prototype: overlapping or incomplete fork checkpoint.\n");
-        }
-
-        Thread* caller = ThreadStore::GetCurrentThreadIfAvailable();
-        if (caller != s_owner || !caller->IsAtNativeTopOfStackForFork())
-        {
-            ForkFailure("NativeAOT fork prototype: fork requires the enabled native caller outside managed frames.\n");
         }
 
         // Keep ordinary admission open while framework workers retire. Their managed
