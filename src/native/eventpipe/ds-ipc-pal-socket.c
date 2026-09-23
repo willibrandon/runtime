@@ -11,6 +11,7 @@
 
 #define DS_IMPL_IPC_PAL_SOCKET_GETTER_SETTER
 #include "ds-ipc-pal-socket.h"
+#include <limits.h>
 
 #if defined (DS_IPC_PAL_TCP)
 #define DS_IPC_PAL_AF_INET
@@ -28,6 +29,7 @@
 #include <unistd.h>
 #include <fcntl.h>
 #include <errno.h>
+#include <time.h>
 #include <sys/un.h>
 #include <sys/stat.h>
 
@@ -148,6 +150,12 @@ ep_rt_utf8_string_free (ep_char8_t *str)
 
 static bool _ipc_pal_socket_init = false;
 
+// A single deadline covers readiness waits, partial transfers and interrupted calls.
+typedef struct {
+	uint64_t start_ms;
+	uint32_t timeout_ms;
+} IpcSocketDeadline;
+
 /*
  * Forward declares of all static functions.
  */
@@ -166,7 +174,8 @@ ipc_socket_recv (
 	ds_ipc_socket_t s,
 	uint8_t * buffer,
 	ssize_t bytes_to_read,
-	ssize_t *bytes_read);
+	ssize_t *bytes_read,
+	uint32_t timeout_ms);
 
 static
 bool
@@ -174,7 +183,8 @@ ipc_socket_send (
 	ds_ipc_socket_t s,
 	const uint8_t *buffer,
 	ssize_t bytes_to_write,
-	ssize_t *bytes_written);
+	ssize_t *bytes_written,
+	uint32_t timeout_ms);
 
 static
 bool
@@ -235,7 +245,7 @@ ipc_stream_close_func (void *object);
 static
 DiagnosticsIpcStream *
 ipc_stream_alloc (
-	int client_socket,
+	ds_ipc_socket_t client_socket,
 	DiagnosticsIpcConnectionMode mode);
 
 /*
@@ -467,46 +477,131 @@ ipc_socket_set_blocking (
 
 static
 inline
+bool
+ipc_monotonic_milliseconds (uint64_t *value)
+{
+#ifndef EP_NO_RT_DEPENDENCY
+	int64_t ticks = ep_rt_perf_counter_query ();
+	int64_t frequency = ep_rt_perf_frequency_query ();
+	if (ticks < 0 || frequency <= 0)
+		return false;
+
+	*value = (uint64_t)(ticks / frequency) * 1000 + (uint64_t)(ticks % frequency) * 1000 / (uint64_t)frequency;
+#elif defined(HOST_WIN32)
+	*value = GetTickCount64 ();
+#else
+	struct timespec now;
+	if (clock_gettime (CLOCK_MONOTONIC, &now) != 0)
+		return false;
+
+	*value = (uint64_t)now.tv_sec * 1000 + (uint64_t)now.tv_nsec / 1000000;
+#endif
+	return true;
+}
+
+static
+inline
+bool
+ipc_deadline_init (IpcSocketDeadline *deadline, uint32_t timeout_ms)
+{
+	deadline->timeout_ms = timeout_ms;
+	deadline->start_ms = 0;
+	return timeout_ms == IPC_TIMEOUT_INFINITE || timeout_ms == 0 || ipc_monotonic_milliseconds (&deadline->start_ms);
+}
+
+static
+inline
+bool
+ipc_deadline_remaining (const IpcSocketDeadline *deadline, uint32_t *remaining_ms)
+{
+	*remaining_ms = deadline->timeout_ms;
+	if (deadline->timeout_ms == IPC_TIMEOUT_INFINITE || deadline->timeout_ms == 0)
+		return true;
+
+	uint64_t now;
+	if (!ipc_monotonic_milliseconds (&now))
+		return false;
+
+	uint64_t elapsed = now - deadline->start_ms;
+	*remaining_ms = elapsed >= deadline->timeout_ms ? 0 : deadline->timeout_ms - (uint32_t)elapsed;
+	return true;
+}
+
+static
+inline
+int
+ipc_poll_fds_with_deadline (
+	ds_ipc_pollfd_t *fds,
+	size_t nfds,
+	const IpcSocketDeadline *deadline)
+{
+	for (;;) {
+		uint32_t remaining_ms;
+		if (!ipc_deadline_remaining (deadline, &remaining_ms))
+			return DS_IPC_SOCKET_ERROR;
+
+		if (remaining_ms == 0 && deadline->timeout_ms != 0)
+			return 0;
+
+		// poll takes a signed timeout. Split large finite waits rather than turning them infinite.
+		int timeout = remaining_ms == IPC_TIMEOUT_INFINITE ? -1 :
+			(remaining_ms > INT_MAX ? INT_MAX : (int)remaining_ms);
+		int result_poll;
+		DS_ENTER_BLOCKING_PAL_SECTION;
+#ifdef HOST_WIN32
+		result_poll = WSAPoll (fds, (ULONG)nfds, timeout);
+#else
+		result_poll = poll (fds, nfds, timeout);
+#endif
+		DS_EXIT_BLOCKING_PAL_SECTION;
+		if (result_poll > 0 || (result_poll < 0 && !ipc_retry_syscall (result_poll)))
+			return result_poll;
+
+		if (deadline->timeout_ms == 0)
+			return 0;
+	}
+}
+
+static
+inline
 int
 ipc_poll_fds (
 	ds_ipc_pollfd_t *fds,
 	size_t nfds,
 	uint32_t timeout)
 {
-	int result_poll;
-	DS_ENTER_BLOCKING_PAL_SECTION;
+	IpcSocketDeadline deadline;
+	if (!ipc_deadline_init (&deadline, timeout))
+		return DS_IPC_SOCKET_ERROR;
+
+	return ipc_poll_fds_with_deadline (fds, nfds, &deadline);
+}
+
+static
+inline
+bool
+ipc_socket_would_block (void)
+{
+	int error = ipc_get_last_error ();
 #ifdef HOST_WIN32
-	result_poll = WSAPoll (fds, (ULONG)nfds, (INT)timeout);
+	return error == WSAEWOULDBLOCK;
 #else
-#ifndef EP_NO_RT_DEPENDENCY
-	int64_t start = 0;
-	int64_t stop = 0;
-	bool retry_poll = false;
-	do {
-		if (timeout != EP_INFINITE_WAIT)
-			start = ep_rt_perf_counter_query ();
-
-		result_poll = poll (fds, nfds, (int)timeout);
-		retry_poll = ipc_retry_syscall (result_poll);
-
-		if (retry_poll && timeout != EP_INFINITE_WAIT) {
-			stop = ep_rt_perf_counter_query ();
-			uint32_t waited_ms = (uint32_t)(((stop - start) * 1000) / ep_rt_perf_frequency_query ());
-			timeout = (waited_ms < timeout) ? timeout - waited_ms : 0;
-		}
-
-		if (retry_poll && timeout == 0)
-			result_poll = 0; // Return time out.
-
-	} while (retry_poll && timeout != 0);
-#else
-	do {
-		result_poll = poll (fds, nfds, (int)timeout);
-	} while (ipc_retry_syscall (result_poll));
+	return error == EAGAIN || error == EWOULDBLOCK;
 #endif
-#endif
-	DS_EXIT_BLOCKING_PAL_SECTION;
-	return result_poll;
+}
+
+static
+inline
+bool
+ipc_socket_wait (ds_ipc_socket_t socket, short events, const IpcSocketDeadline *deadline)
+{
+	ds_ipc_pollfd_t fd;
+	fd.fd = socket;
+	fd.events = events;
+	fd.revents = 0;
+	int result = ipc_poll_fds_with_deadline (&fd, 1, deadline);
+	// A hangup can accompany the final readable bytes. Let recv consume them or report EOF.
+	return result > 0 && (fd.revents & (events | POLLHUP)) != 0;
 }
 
 static
@@ -640,34 +735,36 @@ static
 bool
 ipc_socket_recv (
 	ds_ipc_socket_t s,
-	uint8_t * buffer,
+	uint8_t *buffer,
 	ssize_t bytes_to_read,
-	ssize_t *bytes_read)
+	ssize_t *bytes_read,
+	uint32_t timeout_ms)
 {
-	uint8_t *buffer_cursor = (uint8_t*)buffer;
-	ssize_t current_bytes_read = 0;
-	ssize_t total_bytes_read = 0;
-	bool continue_recv = true;
+	IpcSocketDeadline deadline;
+	*bytes_read = 0;
+	if (!ipc_deadline_init (&deadline, timeout_ms))
+		return false;
 
-	DS_ENTER_BLOCKING_PAL_SECTION;
-	while (continue_recv && bytes_to_read - total_bytes_read > 0) {
-		current_bytes_read = recv (
-			s,
-			(char *)buffer_cursor,
-			bytes_to_read - total_bytes_read,
-			0);
-		if (ipc_retry_syscall (current_bytes_read))
+	while (*bytes_read < bytes_to_read) {
+		if (!ipc_socket_wait (s, POLLIN, &deadline))
+			return false;
+
+		ssize_t remaining = bytes_to_read - *bytes_read;
+		ssize_t current;
+		DS_ENTER_BLOCKING_PAL_SECTION;
+		current = recv (s, (char *)buffer + *bytes_read,
+			remaining > INT_MAX ? INT_MAX : (int)remaining, 0);
+		DS_EXIT_BLOCKING_PAL_SECTION;
+		if (ipc_retry_syscall (current) || (current == DS_IPC_SOCKET_ERROR && ipc_socket_would_block ()))
 			continue;
-		continue_recv = current_bytes_read > 0;
-		if (!continue_recv)
-			break;
-		total_bytes_read += current_bytes_read;
-		buffer_cursor += current_bytes_read;
-	}
-	DS_EXIT_BLOCKING_PAL_SECTION;
 
-	*bytes_read = total_bytes_read;
-	return continue_recv;
+		if (current <= 0)
+			return false;
+
+		*bytes_read += current;
+	}
+
+	return true;
 }
 
 static
@@ -676,32 +773,34 @@ ipc_socket_send (
 	ds_ipc_socket_t s,
 	const uint8_t *buffer,
 	ssize_t bytes_to_write,
-	ssize_t *bytes_written)
+	ssize_t *bytes_written,
+	uint32_t timeout_ms)
 {
-	uint8_t *buffer_cursor = (uint8_t*)buffer;
-	ssize_t current_bytes_written = 0;
-	ssize_t total_bytes_written = 0;
-	bool continue_send = true;
+	IpcSocketDeadline deadline;
+	*bytes_written = 0;
+	if (!ipc_deadline_init (&deadline, timeout_ms))
+		return false;
 
-	DS_ENTER_BLOCKING_PAL_SECTION;
-	while (continue_send && bytes_to_write - total_bytes_written > 0) {
-		current_bytes_written = send (
-			s,
-			(const char *)buffer_cursor,
-			bytes_to_write - total_bytes_written,
-			0);
-		if (ipc_retry_syscall (current_bytes_written))
+	while (*bytes_written < bytes_to_write) {
+		if (!ipc_socket_wait (s, POLLOUT, &deadline))
+			return false;
+
+		ssize_t remaining = bytes_to_write - *bytes_written;
+		ssize_t current;
+		DS_ENTER_BLOCKING_PAL_SECTION;
+		current = send (s, (const char *)buffer + *bytes_written,
+			remaining > INT_MAX ? INT_MAX : (int)remaining, 0);
+		DS_EXIT_BLOCKING_PAL_SECTION;
+		if (ipc_retry_syscall (current) || (current == DS_IPC_SOCKET_ERROR && ipc_socket_would_block ()))
 			continue;
-		continue_send = current_bytes_written != DS_IPC_SOCKET_ERROR;
-		if (!continue_send)
-			break;
-		total_bytes_written += current_bytes_written;
-		buffer_cursor += current_bytes_written;
-	}
-	DS_EXIT_BLOCKING_PAL_SECTION;
 
-	*bytes_written = total_bytes_written;
-	return continue_send;
+		if (current <= 0)
+			return false;
+
+		*bytes_written += current;
+	}
+
+	return true;
 }
 
 /*
@@ -1388,21 +1487,7 @@ ipc_stream_read_func (
 	DiagnosticsIpcStream *ipc_stream = (DiagnosticsIpcStream *)object;
 	ssize_t total_bytes_read = 0;
 
-	if (timeout_ms != IPC_TIMEOUT_INFINITE) {
-		ds_ipc_pollfd_t pfd;
-		pfd.fd = ipc_stream->client_socket;
-		pfd.events = POLLIN;
-
-		int result_poll;
-		result_poll = ipc_poll_fds (&pfd, 1, timeout_ms);
-		if (result_poll <= 0 || !(pfd.revents & POLLIN)) {
-			// timeout or error
-			ep_raise_error ();
-		}
-		// else fallthrough
-	}
-
-	success = ipc_socket_recv (ipc_stream->client_socket, buffer, bytes_to_read, &total_bytes_read);
+	success = ipc_socket_recv (ipc_stream->client_socket, buffer, bytes_to_read, &total_bytes_read, timeout_ms);
 	ep_raise_error_if_nok (success == true);
 
 ep_on_exit:
@@ -1432,21 +1517,7 @@ ipc_stream_write_func (
 	DiagnosticsIpcStream *ipc_stream = (DiagnosticsIpcStream *)object;
 	ssize_t total_bytes_written = 0;
 
-	if (timeout_ms != IPC_TIMEOUT_INFINITE) {
-		ds_ipc_pollfd_t pfd;
-		pfd.fd = ipc_stream->client_socket;
-		pfd.events = POLLOUT;
-
-		int result_poll;
-		result_poll = ipc_poll_fds (&pfd, 1, timeout_ms);
-		if (result_poll <= 0 || !(pfd.revents & POLLOUT)) {
-			// timeout or error
-			ep_raise_error ();
-		}
-		// else fallthrough
-	}
-
-	success = ipc_socket_send (ipc_stream->client_socket, buffer, bytes_to_write, &total_bytes_written);
+	success = ipc_socket_send (ipc_stream->client_socket, buffer, bytes_to_write, &total_bytes_written, timeout_ms);
 	ep_raise_error_if_nok (success == true);
 
 ep_on_exit:
@@ -1498,23 +1569,25 @@ static IpcStreamVtable ipc_stream_vtable = {
 static
 DiagnosticsIpcStream *
 ipc_stream_alloc (
-	int client_socket,
+	ds_ipc_socket_t client_socket,
 	DiagnosticsIpcConnectionMode mode)
 {
 	DiagnosticsIpcStream *instance = ep_rt_object_alloc (DiagnosticsIpcStream);
-	ep_raise_error_if_nok (instance != NULL);
+	if (!instance) {
+		ipc_socket_close (client_socket);
+		return NULL;
+	}
 
 	instance->stream.vtable = &ipc_stream_vtable;
 	instance->client_socket = client_socket;
 	instance->mode = mode;
+	// Readiness alone does not bound a blocking send or the next partial read.
+	if (ipc_socket_set_blocking (client_socket, false) == DS_IPC_SOCKET_ERROR) {
+		ds_ipc_stream_free (instance);
+		return NULL;
+	}
 
-ep_on_exit:
 	return instance;
-
-ep_on_error:
-	ds_ipc_stream_free (instance);
-	instance = NULL;
-	ep_exit_error_handler ();
 }
 
 IpcStream *
@@ -1581,10 +1654,21 @@ ds_ipc_stream_read_fd (
 	msg.msg_control = control;
 	msg.msg_controllen = sizeof(control);
 
-	ssize_t res;
-	while ((res = recvmsg(ipc_stream->client_socket, &msg, 0)) < 0 && errno == EINTR);
-	if (res < 0)
-	   return false;
+	IpcSocketDeadline deadline;
+	ipc_deadline_init (&deadline, IPC_TIMEOUT_INFINITE);
+	for (;;) {
+		if (!ipc_socket_wait (ipc_stream->client_socket, POLLIN, &deadline))
+			return false;
+
+		ssize_t res = recvmsg (ipc_stream->client_socket, &msg, 0);
+		if (ipc_retry_syscall (res) || (res == DS_IPC_SOCKET_ERROR && ipc_socket_would_block ()))
+			continue;
+
+		if (res <= 0)
+			return false;
+
+		break;
+	}
 
 	struct cmsghdr *cmptr;
 	if ((cmptr = CMSG_FIRSTHDR(&msg)) == NULL ||

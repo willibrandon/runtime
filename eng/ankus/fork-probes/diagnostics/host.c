@@ -1,6 +1,7 @@
 #include <dlfcn.h>
 #include <errno.h>
 #include <stdbool.h>
+#include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -13,6 +14,16 @@ typedef int32_t (*initialize_fn)(int32_t, report_fn);
 typedef bool (*shutdown_fn)(bool);
 typedef int (*listen_failure_fn)(const char*);
 typedef int32_t (*enable_fn)(void);
+typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
+static volatile sig_atomic_t interrupt_count;
+
+/* Interrupt blocking system calls without terminating the probe. */
+static void
+interrupt_io(int signal_number)
+{
+    (void) signal_number;
+    interrupt_count++;
+}
 
 /* Initialization callbacks have no retained native state. */
 static void
@@ -42,6 +53,7 @@ main(int argc, char **argv)
     shutdown_fn shutdown_server = (shutdown_fn) dlsym(library, "ankus_probe_diagnostics_shutdown");
     listen_failure_fn listen_failure = (listen_failure_fn) dlsym(library, "ankus_probe_listen_failure");
     enable_fn enable = (enable_fn) dlsym(library, "RhEnableForkSupport");
+    stream_io_fn stream_io = (stream_io_fn) dlsym(library, "ankus_probe_stream_io");
     if (initialize == NULL || shutdown_server == NULL || listen_failure == NULL || enable == NULL || initialize(getpid(), report) != 0)
     {
         return 71;
@@ -97,6 +109,24 @@ main(int argc, char **argv)
         else if (command[0] == 'q')
         {
             return 0;
+        }
+        else if (command[0] == 'i')
+        {
+            char path[192];
+            char direction;
+            uint32_t timeout;
+            uint32_t length;
+            struct sigaction action = {0};
+            action.sa_handler = interrupt_io;
+            sigemptyset(&action.sa_mask);
+            if (stream_io == NULL || sigaction(SIGALRM, &action, NULL) != 0 ||
+                sscanf(command + 1, "%c %u %u %191s", &direction, &timeout, &length, path) != 4)
+            {
+                return 74;
+            }
+
+            printf("io-complete %d\n", stream_io(path, direction, timeout, length));
+            printf("io-signals %d\n", (int) interrupt_count);
         }
         else
         {

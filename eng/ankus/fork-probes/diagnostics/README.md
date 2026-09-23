@@ -25,12 +25,23 @@ cd eng/ankus/fork-probes/diagnostics
 cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -o host
 dotnet publish -c Release -r linux-x64 -o publish -p:IlcSdkPath="$ANKUS_AOT_SDK/"
 python3 run.py --host ./host --library publish/NativeDiagnosticsProbe.so --output results
+python3 io.py --host ./host --library publish/NativeDiagnosticsProbe.so --output io-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
 new results directory for each run. `--case ownership`, `--case ownership-close`
 and `--case listen-failure` select the individual regressions. The runner bounds
 its host, owns its temporary socket directory, and reaps its child processes.
+
+`io.py` checks actual socket transfers against an independently controlled client.
+Partial reads, slow progress, interrupted waits and blocked writes must respect a
+single 300 ms deadline. Other cases verify complete bytes, EOF, zero-byte transfers,
+zero-timeout reads, infinite waits and delayed file-descriptor passing. Signals
+target the native host thread, and the probe reports how many it handled. The
+supervisor kills only its own process group if the runtime stops responding.
+Use `--case partial-read` or another listed case to reproduce one failure against
+an earlier SDK. All cases use the socket implementation linked into the actual
+Native AOT library; the fixture does not replace its transfer or timing functions.
 
 The compiler's existing native-library EventSource warning remains visible. These
 checks exercise native endpoint cleanup only: no managed code runs in the forked
