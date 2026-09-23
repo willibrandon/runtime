@@ -166,13 +166,20 @@ namespace System
             return GetFolderPathCore(folder, option);
         }
 
+#if !NATIVEAOT || !TARGET_UNIX
         private static volatile int s_processId;
+#endif
 
         /// <summary>Gets the unique identifier for the current process.</summary>
         public static int ProcessId
         {
             get
             {
+#if NATIVEAOT && TARGET_UNIX
+                // A native host can fork after initializing this library. The child inherits
+                // managed statics, but its process identity belongs to the operating system.
+                return GetProcessId();
+#else
                 int processId = s_processId;
                 if (processId == 0)
                 {
@@ -181,6 +188,7 @@ namespace System
                     Debug.Assert(processId != 0);
                 }
                 return processId;
+#endif
             }
         }
 

@@ -28,6 +28,7 @@
 
 #ifdef FEATURE_PERFTRACING
 #include "EventPipeInterface.h"
+#include "ForkSupport.h"
 #endif
 
 #ifndef DACCESS_COMPILE
@@ -86,8 +87,11 @@ RhConfig* g_pRhConfig = &g_sRhConfig;
 void InitializeGCEventLock();
 bool InitializeGC();
 
+void RhForkCaptureStartupConfiguration();
+
 static bool InitDLL(HANDLE hPalInstance)
 {
+    RhForkCaptureStartupConfiguration();
 #ifdef FEATURE_CACHED_INTERFACE_DISPATCH
     //
     // Initialize interface dispatch.
@@ -329,11 +333,14 @@ void RuntimeThreadShutdown(void* thread)
     }
 #endif
 
+    RhForkThreadShutdownStarted();
     ThreadStore::DetachCurrentThread();
 
 #ifdef FEATURE_PERFTRACING
     EventPipe_ThreadShutdown();
 #endif
+
+    RhForkThreadShutdownCompleted();
 }
 
 extern "C" bool RhInitialize(bool isDll)

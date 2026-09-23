@@ -22,6 +22,13 @@ namespace System.Threading
 
         private static readonly Lock s_timerEventLock = new Lock();
 
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Retains the scheduling thread independently of the persistent timer lists.
+        /// </summary>
+        private static Thread? s_forkTimerThread;
+#endif
+
         // this means that it's in the s_scheduledTimers collection, not that it's the one which would run on the next TimeoutCallback
         private bool _isScheduled;
         private long _scheduledDueTimeMs;
@@ -33,6 +40,11 @@ namespace System.Threading
             var timers = new List<TimerQueue>(Instances.Length);
             s_scheduledTimersToFire ??= new List<TimerQueue>(Instances.Length);
 
+#if NATIVEAOT && TARGET_UNIX
+            ForkThreadServices.RegisterTimer();
+            StartTimerThreadForFork_Locked();
+#else
+
             // The timer thread must start in the default execution context without transferring the context, so
             // using UnsafeStart() instead of Start()
             Thread timerThread = new Thread(TimerThread)
@@ -41,11 +53,76 @@ namespace System.Threading
                 IsBackground = true
             };
             timerThread.UnsafeStart();
+#endif
 
             // Do this after creating the thread in case thread creation fails so that it will try again next time
             s_scheduledTimers = timers;
             return timers;
         }
+
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Starts a scheduling thread while preserving the manager's existing collections.
+        /// </summary>
+        private static void StartTimerThreadForFork_Locked()
+        {
+            if (s_forkTimerThread != null)
+            {
+                return;
+            }
+
+            var timerThread = new Thread(TimerThread)
+            {
+                Name = ".NET Timer",
+                IsBackground = true
+            };
+
+            if (ForkThreadServices.StartThread(timerThread))
+            {
+                s_forkTimerThread = timerThread;
+            }
+        }
+
+        /// <summary>
+        /// Wakes the scheduling thread so it can stop outside its list and event locks.
+        /// </summary>
+        internal static void RequestForkRetirement() => s_timerEvent.Set();
+
+        /// <summary>
+        /// Releases the stopped scheduling thread without changing registrations or deadlines.
+        /// </summary>
+        /// <returns>Whether its last batch was completely published before retirement.</returns>
+        internal static bool CompleteForkRetirement()
+        {
+            lock (s_timerEventLock)
+            {
+                if (s_scheduledTimersToFire?.Count != 0)
+                {
+                    return false;
+                }
+
+                s_forkTimerThread = null;
+                s_timerEvent.Reset();
+                return true;
+            }
+        }
+
+        /// <summary>
+        /// Restarts the scheduler and forces its first scan of retained absolute deadlines.
+        /// </summary>
+        internal static void ResumeAfterFork()
+        {
+            lock (s_timerEventLock)
+            {
+                if (s_scheduledTimers != null)
+                {
+                    StartTimerThreadForFork_Locked();
+                }
+            }
+
+            s_timerEvent.Set();
+        }
+#endif
 
         private bool SetTimerPortable(uint actualDuration)
         {
@@ -77,6 +154,25 @@ namespace System.Threading
         /// </summary>
         private static void TimerThread()
         {
+#if NATIVEAOT && TARGET_UNIX
+            try
+            {
+                TimerThreadCore();
+            }
+            finally
+            {
+                ForkThreadServices.OnThreadExit();
+            }
+#else
+            TimerThreadCore();
+#endif
+        }
+
+        /// <summary>
+        /// Publishes each due timer batch before observing a framework retirement request.
+        /// </summary>
+        private static void TimerThreadCore()
+        {
             AutoResetEvent timerEvent = s_timerEvent;
             Lock timerEventLock = s_timerEventLock;
             List<TimerQueue> timersToFire = s_scheduledTimersToFire!;
@@ -90,7 +186,20 @@ namespace System.Threading
             int shortestWaitDurationMs = Timeout.Infinite;
             while (true)
             {
+#if NATIVEAOT && TARGET_UNIX
+                if (ForkThreadServices.IsPreparing)
+                {
+                    return;
+                }
+#endif
                 timerEvent.WaitOne(shortestWaitDurationMs);
+
+#if NATIVEAOT && TARGET_UNIX
+                if (ForkThreadServices.IsPreparing)
+                {
+                    return;
+                }
+#endif
 
                 long currentTimeMs = TickCount64;
                 shortestWaitDurationMs = int.MaxValue;

@@ -5,6 +5,8 @@
 #include <eventpipe/ep-rt-aot.h>
 #include <eventpipe/ds-server.h>
 
+bool EventPipe_IsSupported() { return true; }
+
 void EventPipe_Initialize() { ep_init(); }
 
 bool DiagnosticServer_Initialize() { return ds_server_init(); }

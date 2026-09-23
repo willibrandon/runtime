@@ -20,7 +20,38 @@ namespace System.Threading
             private static readonly AutoResetEvent RunGateThreadEvent = new AutoResetEvent(initialState: true);
             private static readonly AutoResetEvent DelayEvent = new AutoResetEvent(initialState: false);
 
+#if NATIVEAOT && TARGET_UNIX
+            /// <summary>
+            /// Retains the gate thread until its checkpoint retirement is complete.
+            /// </summary>
+            private static Thread? s_forkThread;
+
+            /// <summary>
+            /// Prevents restarted gate threads from accumulating persistent GC callbacks.
+            /// </summary>
+            private static bool s_forkGen2CallbackRegistered;
+#endif
+
             private static void GateThreadStart()
+            {
+#if NATIVEAOT && TARGET_UNIX
+                try
+                {
+                    GateThreadStartCore();
+                }
+                finally
+                {
+                    ForkThreadServices.OnThreadExit();
+                }
+#else
+                GateThreadStartCore();
+#endif
+            }
+
+            /// <summary>
+            /// Performs gate maintenance independently of the thread's lifecycle registration.
+            /// </summary>
+            private static void GateThreadStartCore()
             {
                 bool disableStarvationDetection =
                     AppContextConfigHelper.GetBooleanComPlusOrDotNetConfig("System.Threading.ThreadPool.DisableStarvationDetection", "ThreadPool_DisableStarvationDetection", false);
@@ -56,18 +87,44 @@ namespace System.Threading
                 {
                     // Initialize memory usage and limits, and register to update them on gen 2 GCs
                     threadPoolInstance.OnGen2GCCallback();
+#if NATIVEAOT && TARGET_UNIX
+                    if (!s_forkGen2CallbackRegistered)
+                    {
+                        Gen2GcCallback.Register(threadPoolInstance.OnGen2GCCallback);
+                        s_forkGen2CallbackRegistered = true;
+                    }
+#else
                     Gen2GcCallback.Register(threadPoolInstance.OnGen2GCCallback);
+#endif
                 }
 
                 while (true)
                 {
+#if NATIVEAOT && TARGET_UNIX
+                    if (ForkThreadServices.IsPreparing)
+                    {
+                        return;
+                    }
+#endif
                     RunGateThreadEvent.WaitOne();
+#if NATIVEAOT && TARGET_UNIX
+                    if (ForkThreadServices.IsPreparing)
+                    {
+                        return;
+                    }
+#endif
                     int currentTimeMs = Environment.TickCount;
                     delayHelper.SetGateActivitiesTime(currentTimeMs);
 
                     while (true)
                     {
                         bool wasSignaledToWake = DelayEvent.WaitOne((int)delayHelper.GetNextDelay(currentTimeMs));
+#if NATIVEAOT && TARGET_UNIX
+                        if (ForkThreadServices.IsPreparing)
+                        {
+                            return;
+                        }
+#endif
                         currentTimeMs = Environment.TickCount;
 
                         // Thread count adjustment for cooperative blocking
@@ -236,6 +293,31 @@ namespace System.Threading
             [MethodImpl(MethodImplOptions.NoInlining)]
             internal static void EnsureRunningSlow(PortableThreadPool threadPoolInstance)
             {
+#if NATIVEAOT && TARGET_UNIX
+                if (!ForkThreadServices.TryEnterActivation())
+                {
+                    return;
+                }
+
+                try
+                {
+                    EnsureRunningSlowCore(threadPoolInstance);
+                }
+                finally
+                {
+                    ForkThreadServices.ExitActivation();
+                }
+#else
+                EnsureRunningSlowCore(threadPoolInstance);
+#endif
+            }
+
+            /// <summary>
+            /// Publishes gate activity while framework activation is admitted.
+            /// </summary>
+            /// <param name="threadPoolInstance">The existing pool.</param>
+            private static void EnsureRunningSlowCore(PortableThreadPool threadPoolInstance)
+            {
                 int numRunsMask = Interlocked.Exchange(ref threadPoolInstance._separated.gateThreadRunningState, GetRunningStateForNumRuns(MaxRuns));
                 if (numRunsMask == GetRunningStateForNumRuns(0))
                 {
@@ -266,13 +348,45 @@ namespace System.Threading
                         IsBackground = true,
                         Name = ".NET TP Gate"
                     };
+#if NATIVEAOT && TARGET_UNIX
+                    s_forkThread = gateThread;
+                    if (!ForkThreadServices.StartThread(gateThread))
+                    {
+                        s_forkThread = null;
+                    }
+#else
                     gateThread.UnsafeStart();
+#endif
                 }
                 catch (Exception e)
                 {
                     Environment.FailFast("Failed to create the thread pool Gate thread.", e);
                 }
             }
+
+#if NATIVEAOT && TARGET_UNIX
+            /// <summary>
+            /// Wakes either gate wait so retirement is observed outside its maintenance locks.
+            /// </summary>
+            internal static void RequestForkRetirement()
+            {
+                if (s_forkThread != null)
+                {
+                    RunGateThreadEvent.Set();
+                    DelayEvent.Set();
+                }
+            }
+
+            /// <summary>
+            /// Restores gate wake state after its recorded thread has joined.
+            /// </summary>
+            internal static void CompleteForkRetirement()
+            {
+                s_forkThread = null;
+                RunGateThreadEvent.Set();
+                DelayEvent.Reset();
+            }
+#endif
 
             private struct DelayHelper
             {

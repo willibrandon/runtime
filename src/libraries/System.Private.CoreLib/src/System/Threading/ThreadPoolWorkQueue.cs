@@ -618,6 +618,43 @@ namespace System.Threading
             }
         }
 
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Checks that retiring workers released all assignable queue ownership.
+        /// </summary>
+        /// <returns>Whether no worker owns an assigned global queue.</returns>
+        internal bool CompleteForkRetirement()
+        {
+            _queueAssignmentLock.Acquire();
+            try
+            {
+                foreach (int count in _assignedWorkItemQueueThreadCounts)
+                {
+                    if (count != 0)
+                    {
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                _queueAssignmentLock.Release();
+            }
+
+            _separated._hasOutstandingThreadRequest = 0;
+            return true;
+        }
+
+        /// <summary>
+        /// Replaces a retired worker's queue-inspection promise with a fresh request.
+        /// </summary>
+        internal void ResumeAfterFork()
+        {
+            Interlocked.Exchange(ref _separated._hasOutstandingThreadRequest, 0);
+            EnsureThreadRequested();
+        }
+#endif
+
         public void Enqueue(object callback, bool forceGlobal)
         {
             Debug.Assert((callback is IThreadPoolWorkItem) ^ (callback is Task));
@@ -998,6 +1035,31 @@ namespace System.Threading
             //
             while (true)
             {
+#if NATIVEAOT && TARGET_UNIX
+                if (ForkThreadServices.IsPreparing)
+                {
+                    if (workItem != null)
+                    {
+                        if (tl.isProcessingHighPriorityWorkItems)
+                        {
+                            workQueue.EnqueueAtHighPriority(workItem);
+                        }
+                        else
+                        {
+                            workQueue.Enqueue(workItem, forceGlobal: true);
+                        }
+                    }
+
+                    tl.TransferLocalWork();
+                    tl.isProcessingHighPriorityWorkItems = false;
+                    if (s_assignableWorkItemQueueCount > 0)
+                    {
+                        workQueue.UnassignWorkItemQueue(tl);
+                    }
+
+                    return true;
+                }
+#endif
                 if (workItem == null)
                 {
                     missedSteal = false;
@@ -1193,6 +1255,19 @@ namespace System.Threading
                 workQueue.Enqueue(cb, forceGlobal: true);
             }
         }
+
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Removes this exiting worker's local queue without waiting for its finalizer.
+        /// </summary>
+        internal void RetireForFork()
+        {
+            TransferLocalWork();
+            ThreadPoolWorkQueue.WorkStealingQueueList.Remove(workStealingQueue);
+            GC.SuppressFinalize(this);
+            threadLocals = null;
+        }
+#endif
 
         ~ThreadPoolWorkQueueThreadLocals()
         {

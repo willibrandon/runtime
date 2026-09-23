@@ -11,6 +11,7 @@
 #include "RestrictedCallouts.h"
 
 #include "RhConfig.h"
+#include "ForkSupport.h"
 #include "GcEnum.h"
 
 #include "thread.h"
@@ -549,6 +550,7 @@ struct ThreadStubArguments
 
 static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, const char* name)
 {
+    RhForkRecordBackgroundWorker();
     ThreadStubArguments* threadStubArgs = new (nothrow) ThreadStubArguments();
     if (!threadStubArgs)
         return false;

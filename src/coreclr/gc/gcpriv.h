@@ -5636,6 +5636,10 @@ public:
     /***************************************************************************************************/
     // public methods                                                                                  //
     /***************************************************************************************************/
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+    static bool prepare_for_fork(uint32_t timeoutMilliseconds);
+#endif
+
     PER_HEAP_ISOLATED_METHOD heap_segment* make_heap_segment(uint8_t* new_pages,
         size_t size,
         gc_heap* hp,

@@ -260,11 +260,17 @@ public:
     // First phase of thread destructor, disposes stuff related to GC.
     // Executed with thread store lock taken so GC cannot happen.
     void Detach();
+
+    // Completes abandoned allocation accounting from an image-owned snapshot.
+    // Only the fork survivor may call this before new runtime threads or GC start.
+    static void ReleaseAllocationContextForFork(gc_alloc_context* context);
+
     // Second phase of thread destructor.
     // Executed without thread store lock taken.
     void Destroy();
 
     bool                IsInitialized();
+    bool                IsAtNativeTopOfStackForFork();
 
     ee_alloc_context *  GetEEAllocContext();
     gc_alloc_context *  GetAllocContext();

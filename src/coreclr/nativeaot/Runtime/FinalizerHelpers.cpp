@@ -21,6 +21,7 @@
 #include "thread.inl"
 
 #include "yieldprocessornormalized.h"
+#include "ForkSupport.h"
 
 GPTR_DECL(Thread, g_pFinalizerThread);
 
@@ -65,10 +66,12 @@ uint32_t WINAPI FinalizerStart(void* pContext)
     pThread->SetSuppressGcStress();
 
     g_pFinalizerThread = PTR_Thread(pThread);
+    RhForkRegisterFinalizer(pThread);
 
     // Wait for a finalization request.
     uint32_t uResult = PalWaitForSingleObjectEx(hFinalizerEvent, INFINITE, FALSE);
     ASSERT(uResult == WAIT_OBJECT_0);
+    RhForkFinalizerCheckpoint();
 
     // Since we just consumed the request (and the event is auto-reset) we must set the event again so the
     // managed finalizer code will immediately start processing the queue when we run it.
@@ -100,6 +103,16 @@ bool RhInitializeFinalization()
         return false;
 
     return true;
+}
+
+// The fork checkpoint has parked the old finalizer outside all event waits.
+// Only the original caller survives, so both event objects have no waiters.
+bool RhRestartFinalizationAfterFork()
+{
+    g_pFinalizerThread = nullptr;
+    g_FinalizerEvent.CloseEvent();
+    g_FinalizerDoneEvent.CloseEvent();
+    return RhInitializeFinalization();
 }
 
 #ifdef TARGET_WINDOWS
@@ -189,12 +202,14 @@ EXTERN_C UInt32_BOOL QCALLTYPE RhpWaitForFinalizerRequest()
     // two second timeout expires.
     do
     {
+        RhForkFinalizerCheckpoint();
         HANDLE  lowMemEvent = g_lowMemoryNotification;
         HANDLE  rgWaitHandles[] = { g_FinalizerEvent.GetOSEvent(), lowMemEvent };
         uint32_t  cWaitHandles = (fLastEventWasLowMemory || (lowMemEvent == NULL)) ? 1 : 2;
         uint32_t  uTimeout = fLastEventWasLowMemory ? 2000 : INFINITE;
 
         uint32_t uResult = PalCompatibleWaitAny(/*alertable=*/ FALSE, uTimeout, cWaitHandles, rgWaitHandles, /*allowReentrantWait=*/ FALSE);
+        RhForkFinalizerCheckpoint();
 
         switch (uResult)
         {

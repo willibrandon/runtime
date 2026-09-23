@@ -32,6 +32,9 @@ private:
 public:
     void                    LockThreadStore();
     void                    UnlockThreadStore();
+    bool                    HasOnlyForkThreads(Thread* caller, Thread* finalizer, bool allowBackgroundGC = false);
+    void                    RemoveFinalizerAfterFork(Thread* finalizer);
+    bool                    RefreshCallerAfterFork(Thread* caller);
 
 public:
     class Iterator
@@ -83,4 +86,3 @@ ThreadStore * GetThreadStore();
 #define END_FOREACH_THREAD  \
     }                       \
 }                           \
-

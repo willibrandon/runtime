@@ -28,6 +28,10 @@
 #include "gcenv.inl"
 #include "gceventstatus.h"
 
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(BUILD_AS_STANDALONE)
+#include <atomic>
+#endif
+
 #ifdef __INTELLISENSE__
 #if defined(FEATURE_SVR_GC)
 
@@ -54,6 +58,53 @@ namespace WKS {
 
 #include "gcimpl.h"
 #include "gcpriv.h"
+
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+// The fork gate is independent of application GC configuration and temporary
+// concurrent-GC disable requests from other runtime subsystems.
+static std::atomic<bool> s_forkGCAdmissionClosed(false);
+static std::atomic<bool> s_forkGCExitRequested(false);
+static std::atomic<bool> s_forkGCReady(false);
+static std::atomic<uint64_t> s_forkGCActiveObservations(0);
+static IGCHeap* s_forkOwnedGCHeap;
+
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr), "Fork observations require a lock-free Linux x64 counter.");
+
+// A passive observation of actual active collection state while gc_lock is held.
+// Reading or recording it never changes collection selection or worker progress.
+extern "C" __attribute__((visibility("default"))) uint64_t RhGetForkGCActiveObservationCount()
+{
+    return s_forkGCActiveObservations.load();
+}
+
+extern "C" bool RhIsOwnedGCForFork(IGCHeap* heap)
+{
+    return heap != nullptr && heap == s_forkOwnedGCHeap;
+}
+
+extern "C" bool RhPrepareGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds)
+{
+    return RhIsOwnedGCForFork(heap) && gc_heap::prepare_for_fork(timeoutMilliseconds);
+}
+
+extern "C" bool RhIsGCReadyForFork()
+{
+    return s_forkGCReady.load();
+}
+
+extern "C" bool RhResumeGCForFork()
+{
+    if (!s_forkGCReady.load() || !s_forkGCAdmissionClosed.load())
+    {
+        return false;
+    }
+
+    s_forkGCExitRequested.store(false);
+    s_forkGCReady.store(false);
+    s_forkGCAdmissionClosed.store(false);
+    return true;
+}
+#endif
 
 #ifdef TARGET_AMD64
 #define USE_VXSORT
@@ -24598,6 +24649,9 @@ void gc_heap::garbage_collect (int n)
             (should_do_blocking_collection == FALSE) &&
             gc_can_use_concurrent &&
             !temp_disable_concurrent_p &&
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+            !s_forkGCAdmissionClosed.load() &&
+#endif
             ((settings.pause_mode == pause_interactive) || (settings.pause_mode == pause_sustained_low_latency)))
         {
             keep_bgc_threads_p = TRUE;
@@ -40248,6 +40302,82 @@ void gc_heap::kill_gc_thread()
     bgc_thread = 0;
 }
 
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
+{
+    bool expected = false;
+    if (!s_forkGCAdmissionClosed.compare_exchange_strong(expected, true))
+    {
+        return false;
+    }
+
+    uint32_t elapsed = 0;
+    bool observedActive = false;
+    while (true)
+    {
+        bool idle = false;
+        if (try_enter_spin_lock(&gc_lock))
+        {
+            // BGC releases gc_lock while sweeping. Acquiring it alone does not
+            // prove completion; include both selected and actively running work.
+            idle = !settings.concurrent && !is_bgc_in_progress();
+            if (!idle && !observedActive)
+            {
+                s_forkGCActiveObservations.fetch_add(1);
+                observedActive = true;
+            }
+
+            if (idle)
+            {
+                bgc_threads_timeout_cs.Enter();
+                s_forkGCExitRequested.store(true);
+                if (bgc_thread_running)
+                {
+                    bgc_start_event.Set();
+                }
+
+                bgc_threads_timeout_cs.Leave();
+            }
+
+            leave_spin_lock(&gc_lock);
+        }
+
+        if (idle)
+        {
+            break;
+        }
+
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+    while (true)
+    {
+        bgc_threads_timeout_cs.Enter();
+        bool retired = !bgc_thread_running && bgc_thread == nullptr;
+        bgc_threads_timeout_cs.Leave();
+        if (retired)
+        {
+            // Runtime ThreadStore drain plus complete native shutdown accounting
+            // separately acknowledge that this worker has finished its teardown.
+            s_forkGCReady.store(true);
+            return true;
+        }
+
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+}
+#endif
+
 void gc_heap::bgc_thread_function()
 {
     assert (background_gc_done_event.IsValid());
@@ -40288,6 +40418,22 @@ void gc_heap::bgc_thread_function()
         // not calling disable_preemptive here 'cause we
         // can't wait for GC complete here - RestartEE will be called
         // when we've done the init work.
+
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+        if (s_forkGCExitRequested.load())
+        {
+            // The request is published only after the last BGC completed and new
+            // selection was closed. Retire outside the event wait, preserving the
+            // heap and reusable events for ordinary lazy startup after the fork.
+            bgc_threads_timeout_cs.Enter();
+            bgc_start_event.Reset();
+            bgc_thread_running = FALSE;
+            bgc_thread = nullptr;
+            bgc_thread_id.Clear();
+            bgc_threads_timeout_cs.Leave();
+            break;
+        }
+#endif
 
         if (result == WAIT_TIMEOUT)
         {
@@ -49322,6 +49468,11 @@ HRESULT GCHeap::Init(size_t hn)
 //System wide initialization
 HRESULT GCHeap::Initialize()
 {
+#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+    // An externally loaded collector cannot borrow this built-in heap's fork API.
+    s_forkOwnedGCHeap = this;
+#endif
+
 #ifndef TRACE_GC
     STRESS_LOG_VA (1, (ThreadStressLog::gcLoggingIsOffMsg()));
 #endif

@@ -4,6 +4,9 @@
 #ifndef EVENTPIPE_INTERFACE_H
 #define EVENTPIPE_INTERFACE_H
 
+// Reports the linked diagnostics implementation, independently of environment settings.
+bool EventPipe_IsSupported();
+
 // Initialize EventPipe
 void EventPipe_Initialize();
 

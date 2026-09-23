@@ -26,6 +26,7 @@
 #include "rhbinder.h"
 #include "stressLog.h"
 #include "RhConfig.h"
+#include "ForkSupport.h"
 #include "GcEnum.h"
 #include "NativeContext.h"
 #include "minipal/time.h"
@@ -375,6 +376,20 @@ void Thread::Detach()
     GCHeapUtilities::GetGCHeap()->FixAllocContext(context, NULL, NULL);
 
     SetDetached();
+}
+
+void Thread::ReleaseAllocationContextForFork(gc_alloc_context* context)
+{
+    // Match normal detach accounting without accessing or changing a Thread
+    // object whose vanished pthread TLS may already belong to another image.
+    if (context->alloc_ptr != nullptr)
+    {
+        s_DeadThreadsNonAllocBytes += context->alloc_limit - context->alloc_ptr;
+        GCHeapUtilities::GetGCHeap()->FixAllocContext(context, NULL, NULL);
+    }
+
+    // Consume the copied context once; the parent's live context was untouched.
+    context->init();
 }
 
 void Thread::Destroy()
@@ -1188,6 +1203,11 @@ EXTERN_C uint32_t QCALLTYPE RhCompatibleReentrantWaitAny(UInt32_BOOL alertable, 
 }
 #endif // TARGET_UNIX
 
+bool Thread::IsAtNativeTopOfStackForFork()
+{
+    return IsInitialized() && m_pTransitionFrame == TOP_OF_STACK_MARKER;
+}
+
 EXTERN_C void RhSetRuntimeInitializationCallback(int (*fPtr)())
 {
     g_RuntimeInitializationCallback = fPtr;
@@ -1379,6 +1399,7 @@ EXTERN_C NOINLINE void FASTCALL RhpReversePInvokeAttachOrTrapThread2(ReversePInv
 
 FCIMPL1(void, RhpReversePInvoke, ReversePInvokeFrame * pFrame)
 {
+    RhForkBeforeManagedEntry();
     Thread * pCurThread = ThreadStore::RawGetCurrentThread();
     pFrame->m_savedThread = pCurThread;
     if (pCurThread->InlineTryFastReversePInvoke(pFrame))

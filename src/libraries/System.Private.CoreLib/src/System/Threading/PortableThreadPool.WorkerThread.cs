@@ -60,6 +60,13 @@ namespace System.Threading
 
             private static readonly ThreadStart s_workerThreadStart = WorkerThreadStart;
 
+#if NATIVEAOT && TARGET_UNIX
+            /// <summary>
+            /// Counts worker loops that have not completed their managed cleanup.
+            /// </summary>
+            private static int s_forkWorkerCount;
+#endif
+
             private static void CreateWorkerThread()
             {
                 // Thread pool threads must start in the default execution context without transferring the context, so
@@ -68,10 +75,47 @@ namespace System.Threading
                 workerThread.IsThreadPoolThread = true;
                 workerThread.IsBackground = true;
                 workerThread.SetThreadPoolWorkerThreadName();
+#if NATIVEAOT && TARGET_UNIX
+                Interlocked.Increment(ref s_forkWorkerCount);
+                try
+                {
+                    if (!ForkThreadServices.StartThread(workerThread))
+                    {
+                        Interlocked.Decrement(ref s_forkWorkerCount);
+                    }
+                }
+                catch
+                {
+                    Interlocked.Decrement(ref s_forkWorkerCount);
+                    throw;
+                }
+#else
                 workerThread.UnsafeStart();
+#endif
             }
 
             private static void WorkerThreadStart()
+            {
+#if NATIVEAOT && TARGET_UNIX
+                try
+                {
+                    WorkerThreadStartCore();
+                }
+                finally
+                {
+                    ThreadPoolWorkQueueThreadLocals.threadLocals?.RetireForFork();
+                    Interlocked.Decrement(ref s_forkWorkerCount);
+                    ForkThreadServices.OnThreadExit();
+                }
+#else
+                WorkerThreadStartCore();
+#endif
+            }
+
+            /// <summary>
+            /// Runs the worker loop independently of its framework thread registration.
+            /// </summary>
+            private static void WorkerThreadStartCore()
             {
                 PortableThreadPool threadPoolInstance = ThreadPoolInstance;
 
@@ -112,9 +156,21 @@ namespace System.Threading
 
                 while (true)
                 {
+#if NATIVEAOT && TARGET_UNIX
+                    if (ForkThreadServices.IsPreparing)
+                    {
+                        return;
+                    }
+#endif
                     bool spinWait = true;
                     while (semaphore.Wait(timeoutMs, spinWait))
                     {
+#if NATIVEAOT && TARGET_UNIX
+                        if (ForkThreadServices.IsPreparing)
+                        {
+                            return;
+                        }
+#endif
                         WorkerDoWork(threadPoolInstance, ref spinWait);
                     }
 
@@ -269,6 +325,31 @@ namespace System.Threading
 
             internal static void MaybeAddWorkingWorker(PortableThreadPool threadPoolInstance)
             {
+#if NATIVEAOT && TARGET_UNIX
+                if (!ForkThreadServices.TryEnterActivation())
+                {
+                    return;
+                }
+
+                try
+                {
+                    MaybeAddWorkingWorkerCore(threadPoolInstance);
+                }
+                finally
+                {
+                    ForkThreadServices.ExitActivation();
+                }
+#else
+                MaybeAddWorkingWorkerCore(threadPoolInstance);
+#endif
+            }
+
+            /// <summary>
+            /// Reserves processing capacity and starts workers while activation is admitted.
+            /// </summary>
+            /// <param name="threadPoolInstance">The existing pool.</param>
+            private static void MaybeAddWorkingWorkerCore(PortableThreadPool threadPoolInstance)
+            {
                 ThreadCounts counts = threadPoolInstance._separated.counts;
                 short numExistingThreads, numProcessingWork, newNumExistingThreads, newNumProcessingWork;
                 while (true)
@@ -311,6 +392,27 @@ namespace System.Threading
                     toCreate--;
                 }
             }
+
+#if NATIVEAOT && TARGET_UNIX
+            /// <summary>
+            /// Supplies at most one shutdown wake for each recorded worker.
+            /// </summary>
+            internal static void RequestForkRetirement()
+            {
+                int count = Volatile.Read(ref s_forkWorkerCount);
+                if (count != 0)
+                {
+                    s_semaphore.WakeForForkRetirement(count);
+                }
+            }
+
+            /// <summary>
+            /// Clears only unused semaphore credits after all worker waits have returned.
+            /// </summary>
+            /// <returns>Whether no worker or semaphore waiter remains.</returns>
+            internal static bool CompleteForkRetirement()
+                => Volatile.Read(ref s_forkWorkerCount) == 0 && s_semaphore.ResetAfterForkRetirement();
+#endif
 
             /// <summary>
             /// Returns if the current thread should stop processing work on the thread pool.

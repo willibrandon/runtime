@@ -12,6 +12,7 @@ set(COMMON_RUNTIME_SOURCES
     EHHelpers.cpp
     event.cpp
     FinalizerHelpers.cpp
+    ForkSupport.cpp
     GcEnum.cpp
     GCHelpers.cpp
     gctoclreventsink.cpp

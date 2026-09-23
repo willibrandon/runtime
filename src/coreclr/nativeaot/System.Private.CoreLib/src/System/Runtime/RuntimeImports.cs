@@ -26,6 +26,23 @@ namespace System.Runtime
     {
         internal const string RuntimeLibrary = "*";
 
+#if TARGET_UNIX
+        /// <summary>
+        /// Registers the managed framework service checkpoint with the owned native fork prototype.
+        /// </summary>
+        /// <param name="prepare">Retires services before native admission closes.</param>
+        /// <param name="parent">Resumes services in the parent.</param>
+        /// <param name="childReset">Validates inherited state before child threads start.</param>
+        /// <param name="childResume">Resumes services after child native admission opens.</param>
+        /// <returns>One for registration success, or a native error status.</returns>
+        [LibraryImport(RuntimeLibrary)]
+        internal static unsafe partial int RhRegisterForkServiceCallbacks(
+            delegate* unmanaged[Cdecl]<int> prepare,
+            delegate* unmanaged[Cdecl]<int> parent,
+            delegate* unmanaged[Cdecl]<int> childReset,
+            delegate* unmanaged[Cdecl]<int> childResume);
+#endif
+
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         [RuntimeImport(RuntimeLibrary, "RhGetThreadEntryPointAddress")]
 #if TARGET_UNIX

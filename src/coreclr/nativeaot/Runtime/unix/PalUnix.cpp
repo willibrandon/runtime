@@ -814,6 +814,8 @@ bool PalSetCurrentThreadName(const char* name)
     return true;
 }
 
+void RhForkRecordBackgroundWorker();
+
 bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
@@ -826,6 +828,7 @@ bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pC
 
 bool PalStartEventPipeHelperThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
+    RhForkRecordBackgroundWorker();
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
 }
 
@@ -1260,5 +1263,6 @@ void PalGetSystemTimeAsFileTime(FILETIME *lpSystemTimeAsFileTime)
 
 uint64_t PalGetCurrentOSThreadId()
 {
-    return (uint64_t)minipal_get_current_thread_id();
+    // A fork child inherits TLS caches but receives a new OS thread identity.
+    return (uint64_t)minipal_get_current_thread_id_no_cache();
 }

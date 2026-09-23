@@ -1,0 +1,24 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>NativeForkProbe</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <UseNativeLibPrefix>false</UseNativeLibPrefix>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(ForkRuntimePrototype)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" />
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkGCActiveObservationCount" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkGCActiveObservationCount" />
+  </ItemGroup>
+</Project>
