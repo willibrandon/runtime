@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #include <eventpipe/ep-rt-config.h>
+#include <eventpipe/ds-rt-config.h>
 
 #ifdef ENABLE_PERFTRACING
 #include <eventpipe/ep-types.h>
@@ -435,6 +436,26 @@ void ep_rt_aot_set_server_name (void)
     PalSetCurrentThreadName(".NET EventPipe");
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+static void* s_diagnosticsServerThread;
+
+bool ep_rt_aot_join_server_thread()
+{
+    if (s_diagnosticsServerThread == nullptr)
+    {
+        return true;
+    }
+
+    if (!PalJoinThread(s_diagnosticsServerThread))
+    {
+        return false;
+    }
+
+    s_diagnosticsServerThread = nullptr;
+    return true;
+}
+#endif
+
 bool
 ep_rt_aot_thread_create (
     void *thread_func,
@@ -456,7 +477,12 @@ ep_rt_aot_thread_create (
 
     case EP_THREAD_TYPE_SERVER:
         // Match CoreCLR and hardcode a null thread context in this case.
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+        return s_diagnosticsServerThread == nullptr &&
+            PalStartJoinableThread(reinterpret_cast<BackgroundCallback>(thread_func), nullptr, &s_diagnosticsServerThread);
+#else
         return PalStartEventPipeHelperThread(reinterpret_cast<BackgroundCallback>(thread_func), nullptr);
+#endif
 
     case EP_THREAD_TYPE_SESSION:
     case EP_THREAD_TYPE_SAMPLING:

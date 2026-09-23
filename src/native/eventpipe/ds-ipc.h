@@ -17,6 +17,11 @@
  * IpcStreamFactory.
  */
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// Set before starting the listener or after its previous thread has joined.
+void ds_ipc_stream_factory_set_interrupt (int descriptor);
+#endif
+
 bool
 ds_ipc_stream_factory_init (void);
 

@@ -13,6 +13,40 @@
 #include "ds-profiler-protocol.h"
 #include "ds-rt.h"
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+#include <unistd.h>
+#include <fcntl.h>
+#include <errno.h>
+
+extern bool ep_rt_aot_join_server_thread (void);
+static int _server_interrupt [2] = {-1, -1};
+static volatile uint32_t _server_pausing;
+static bool _server_paused;
+static DiagnosticsIpcStream *_server_pending_stream;
+static DiagnosticsIpcMessage _server_pending_message;
+static uint32_t _server_received;
+
+static bool server_create_interrupt (void)
+{
+	if (pipe (_server_interrupt) != 0)
+		return false;
+
+	for (uint32_t i = 0; i < 2; i++) {
+		int flags = fcntl (_server_interrupt [i], F_GETFL, 0);
+		if (flags < 0 || fcntl (_server_interrupt [i], F_SETFL, flags | O_NONBLOCK) != 0 ||
+			fcntl (_server_interrupt [i], F_SETFD, FD_CLOEXEC) != 0) {
+			close (_server_interrupt [0]);
+			close (_server_interrupt [1]);
+			_server_interrupt [0] = _server_interrupt [1] = -1;
+			return false;
+		}
+	}
+
+	ds_ipc_stream_factory_set_interrupt (_server_interrupt [0]);
+	return true;
+}
+#endif
+
 /*
  * Globals and volatile access functions.
  */
@@ -115,54 +149,87 @@ server_warning_callback (
 static size_t server_loop_tick (void* data) {
 	if (server_volatile_load_shutting_down_state ())
 		return 1; // done
-	DiagnosticsIpcStream *stream = ds_ipc_stream_factory_get_next_available_stream (server_warning_callback);
-	if (!stream)
-		return 0; // continue
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	if (ep_rt_volatile_load_uint32_t (&_server_pausing) != 0)
+		return 1;
 
-	ds_rt_auto_trace_signal ();
+	DiagnosticsIpcStream *stream = _server_pending_stream;
+	DiagnosticsIpcMessage *message = &_server_pending_message;
+	if (stream == NULL) {
+		stream = ds_ipc_stream_factory_get_next_available_stream (server_warning_callback);
+		if (stream == NULL)
+			return ep_rt_volatile_load_uint32_t (&_server_pausing) != 0 ? 1 : 0;
 
-	DiagnosticsIpcMessage message;
-	if (!ds_ipc_message_init (&message))
-		return 0; // continue
-
-	if (!ds_ipc_message_initialize_stream (&message, stream)) {
-		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
-		ds_ipc_stream_free (stream);
-		ds_ipc_message_fini (&message);
-		return 0; // continue
+		ds_rt_auto_trace_signal ();
+		ds_ipc_message_init (message);
+		_server_pending_stream = stream;
+		_server_received = 0;
 	}
 
+	int32_t read_result = ds_ipc_message_resume_stream (message, stream, &_server_received, _server_interrupt [0]);
+	if (read_result == -2 || ep_rt_volatile_load_uint32_t (&_server_pausing) != 0)
+		return 1;
+
+	_server_pending_stream = NULL;
+	_server_received = 0;
+	if (read_result == 0) {
+		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
+		ds_ipc_stream_free (stream);
+		ds_ipc_message_fini (message);
+		return 0;
+	}
+#else
+	DiagnosticsIpcStream *stream = ds_ipc_stream_factory_get_next_available_stream (server_warning_callback);
+	if (!stream)
+		return 0;
+
+	ds_rt_auto_trace_signal ();
+	DiagnosticsIpcMessage storage;
+	DiagnosticsIpcMessage *message = &storage;
+	if (!ds_ipc_message_init (message)) {
+		ds_ipc_stream_free (stream);
+		return 0;
+	}
+
+	if (!ds_ipc_message_initialize_stream (message, stream)) {
+		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
+		ds_ipc_stream_free (stream);
+		ds_ipc_message_fini (message);
+		return 0;
+	}
+#endif
+
 	if (ep_rt_utf8_string_compare (
-		(const ep_char8_t *)ds_ipc_header_get_magic_ref (ds_ipc_message_get_header_ref (&message)),
+		(const ep_char8_t *)ds_ipc_header_get_magic_ref (ds_ipc_message_get_header_ref (message)),
 		(const ep_char8_t *)DOTNET_IPC_V1_MAGIC) != 0) {
 
 		ds_ipc_message_send_error (stream, DS_IPC_E_UNKNOWN_MAGIC);
 		ds_ipc_stream_free (stream);
-		ds_ipc_message_fini (&message);
+		ds_ipc_message_fini (message);
 		return 0; // continue
 	}
 
-	DS_LOG_INFO_2 ("DiagnosticServer - received IPC message with command set (%d) and command id (%d)", ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (&message)), ds_ipc_header_get_commandid (ds_ipc_message_get_header_ref (&message)));
+	DS_LOG_INFO_2 ("DiagnosticServer - received IPC message with command set (%d) and command id (%d)", ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (message)), ds_ipc_header_get_commandid (ds_ipc_message_get_header_ref (message)));
 
-	switch ((DiagnosticsServerCommandSet)ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (&message))) {
+	switch ((DiagnosticsServerCommandSet)ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (message))) {
 	case DS_SERVER_COMMANDSET_DUMP:
-		ds_dump_protocol_helper_handle_ipc_message (&message, stream);
+		ds_dump_protocol_helper_handle_ipc_message (message, stream);
 		break;
 	case DS_SERVER_COMMANDSET_EVENTPIPE:
-		ds_eventpipe_protocol_helper_handle_ipc_message (&message, stream);
+		ds_eventpipe_protocol_helper_handle_ipc_message (message, stream);
 		break;
 	case DS_SERVER_COMMANDSET_PROFILER:
-		ds_profiler_protocol_helper_handle_ipc_message (&message, stream);
+		ds_profiler_protocol_helper_handle_ipc_message (message, stream);
 		break;
 	case DS_SERVER_COMMANDSET_PROCESS:
-		ds_process_protocol_helper_handle_ipc_message (&message, stream);
+		ds_process_protocol_helper_handle_ipc_message (message, stream);
 		break;
 	default:
-		server_protocol_helper_unknown_command (&message, stream);
+		server_protocol_helper_unknown_command (message, stream);
 		break;
 	}
 
-	ds_ipc_message_fini (&message);
+	ds_ipc_message_fini (message);
 
 	(void)data; // unused
 	return 0; // continue
@@ -186,6 +253,63 @@ EP_RT_DEFINE_THREAD_FUNC (server_thread)
 	return (ep_rt_thread_start_func_return_t)0;
 }
 #endif // PERFTRACING_DISABLE_THREADS
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+uint32_t ds_server_paused_input_bytes (void)
+{
+	return _server_paused ? _server_received : UINT32_MAX;
+}
+
+bool ds_server_pause_listener (void)
+{
+	if (_server_interrupt [0] < 0 || _server_paused)
+		return true;
+
+	ep_rt_volatile_store_uint32_t (&_server_pausing, 1);
+	uint8_t wake = 1;
+	ssize_t written;
+	do {
+		written = write (_server_interrupt [1], &wake, 1);
+	} while (written < 0 && errno == EINTR);
+
+	if (written < 0 && errno != EAGAIN && errno != EWOULDBLOCK)
+		return false;
+
+	if (!ep_rt_aot_join_server_thread ())
+		return false;
+
+	_server_paused = true;
+	return true;
+}
+
+bool ds_server_resume_listener (void)
+{
+	if (!_server_paused)
+		return true;
+
+	uint8_t buffer [32];
+	for (;;) {
+		ssize_t count = read (_server_interrupt [0], buffer, sizeof (buffer));
+		if (count > 0 || (count < 0 && errno == EINTR))
+			continue;
+
+		if (count == 0 || (errno != EAGAIN && errno != EWOULDBLOCK))
+			return false;
+
+		break;
+	}
+
+	ep_rt_volatile_store_uint32_t (&_server_pausing, 0);
+	ep_rt_thread_id_t thread_id = ep_rt_uint64_t_to_thread_id_t (0);
+	if (!ep_rt_thread_create ((void *)server_thread, NULL, EP_THREAD_TYPE_SERVER, (void *)&thread_id)) {
+		ep_rt_volatile_store_uint32_t (&_server_pausing, 1);
+		return false;
+	}
+
+	_server_paused = false;
+	return true;
+}
+#endif
 
 void
 ds_server_disable (void)
@@ -223,6 +347,9 @@ ds_server_init (void)
 	}
 
 	if (ds_ipc_stream_factory_has_active_ports ()) {
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		ep_raise_error_if_nok (server_create_interrupt ());
+#endif
 		ds_rt_auto_trace_init ();
 		ds_rt_auto_trace_launch ();
 
@@ -249,6 +376,14 @@ ep_on_exit:
 
 ep_on_error:
 	EP_ASSERT (!result);
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	if (_server_interrupt [0] >= 0) {
+		ds_ipc_stream_factory_set_interrupt (-1);
+		close (_server_interrupt [0]);
+		close (_server_interrupt [1]);
+		_server_interrupt [0] = _server_interrupt [1] = -1;
+	}
+#endif
 	ep_exit_error_handler ();
 }
 

@@ -601,7 +601,7 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
     bool started;
 #ifdef TARGET_UNIX
     started = joinHandle != nullptr
-        ? PalStartJoinableGCThread(threadStub, threadStubArgs, joinHandle)
+        ? PalStartJoinableThread(threadStub, threadStubArgs, joinHandle)
         : PalStartBackgroundGCThread(threadStub, threadStubArgs);
 #else
     ASSERT(joinHandle == nullptr);
@@ -625,7 +625,7 @@ extern "C" bool RhCreateServerGCThreadForFork(void (*start)(void*), void* contex
 
 extern "C" bool RhJoinServerGCThreadForFork(void* handle)
 {
-    return PalJoinGCThread(handle);
+    return PalJoinThread(handle);
 }
 #endif
 

@@ -250,9 +250,9 @@ bool PalInitComAndFlsSlot();
 #endif
 bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);
 #ifdef TARGET_UNIX
-// Joinable server collectors must finish native thread teardown before fork.
-bool PalStartJoinableGCThread(BackgroundCallback callback, void* context, void** handle);
-bool PalJoinGCThread(void* handle);
+// Owned runtime workers must finish native thread teardown before fork.
+bool PalStartJoinableThread(BackgroundCallback callback, void* context, void** handle);
+bool PalJoinThread(void* handle);
 #endif
 bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);
 bool PalStartEventPipeHelperThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext);

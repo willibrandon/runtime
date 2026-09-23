@@ -26,6 +26,15 @@
 static volatile uint32_t _ds_shutting_down_state = 0;
 static dn_vector_ptr_t *_ds_port_array = NULL;
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+static int _ds_interrupt_fd = -1;
+
+void ds_ipc_stream_factory_set_interrupt (int descriptor)
+{
+	_ds_interrupt_fd = descriptor;
+}
+#endif
+
 // set this in get_next_available_stream, and then expose a callback that
 // allows us to track which connections have sent their ResumeRuntime commands
 static DiagnosticsPort *_ds_current_port = NULL;
@@ -408,11 +417,21 @@ ds_ipc_stream_factory_get_next_available_stream (ds_ipc_error_callback_func call
 			ipc_stream_factory_get_next_timeout (poll_timeout_ms);
 
 		int32_t ret_val;
-		if (dn_vector_size (&ipc_poll_handles) > 0) {
+		if (dn_vector_size (&ipc_poll_handles) > 0
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+			|| _ds_interrupt_fd >= 0
+#endif
+		) {
 			poll_attempts++;
 			DS_LOG_DEBUG_2 ("ds_ipc_stream_factory_get_next_available_stream - Poll attempt: %d, timeout: %dms.", poll_attempts, poll_timeout_ms);
 			ipc_log_poll_handles (&ipc_poll_handles);
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+			ret_val = ds_ipc_poll_interruptible (dn_vector_data_t (&ipc_poll_handles, DiagnosticsIpcPollHandle), dn_vector_size (&ipc_poll_handles), poll_timeout_ms, callback, _ds_interrupt_fd);
+			if (ret_val == -2)
+				break;
+#else
 			ret_val = ds_ipc_poll (dn_vector_data_t (&ipc_poll_handles, DiagnosticsIpcPollHandle), dn_vector_size (&ipc_poll_handles), poll_timeout_ms, callback);
+#endif
 		} else {
 			if (poll_timeout_ms == IPC_TIMEOUT_INFINITE)
 				poll_timeout_ms = DS_IPC_POLL_TIMEOUT_MAX_MS;

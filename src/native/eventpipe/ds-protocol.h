@@ -104,6 +104,17 @@ ds_ipc_message_initialize_stream (
 	DiagnosticsIpcMessage *message,
 	DiagnosticsIpcStream *stream);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// Returns 1 when complete, 0 on error, or -2 when interrupted. The message and
+// byte count remain owned by the caller and can be resumed on another thread.
+int32_t
+ds_ipc_message_resume_stream (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	uint32_t *received,
+	int interrupt_fd);
+#endif
+
 bool
 ds_ipc_message_try_parse_value (
 	uint8_t **buffer,

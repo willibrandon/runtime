@@ -1187,19 +1187,22 @@ ds_ipc_reset (DiagnosticsIpc *ipc)
 {
 }
 
+static
 int32_t
-ds_ipc_poll (
+ipc_poll_interruptible (
 	DiagnosticsIpcPollHandle *poll_handles_data,
 	size_t poll_handles_data_len,
 	uint32_t timeout_ms,
-	ds_ipc_error_callback_func callback)
+	ds_ipc_error_callback_func callback,
+	int interrupt_fd)
 {
-	EP_ASSERT (poll_handles_data != NULL);
+	EP_ASSERT (poll_handles_data != NULL || poll_handles_data_len == 0);
 
 	int32_t result = DS_IPC_SOCKET_ERROR;
 
 	// prepare the pollfd structs
-	ds_ipc_pollfd_t *poll_fds = ep_rt_object_array_alloc (ds_ipc_pollfd_t, poll_handles_data_len);
+	size_t count = poll_handles_data_len + (interrupt_fd >= 0 ? 1 : 0);
+	ds_ipc_pollfd_t *poll_fds = ep_rt_object_array_alloc (ds_ipc_pollfd_t, count);
 	ep_raise_error_if_nok (poll_fds != NULL);
 
 	for (uint32_t i = 0; i < poll_handles_data_len; ++i) {
@@ -1219,8 +1222,17 @@ ds_ipc_poll (
 		poll_fds [i].events = POLLIN;
 	}
 
+	if (interrupt_fd >= 0) {
+		poll_fds [poll_handles_data_len].fd = interrupt_fd;
+		poll_fds [poll_handles_data_len].events = POLLIN;
+	}
+
 	int result_poll;
-	result_poll = ipc_poll_fds (poll_fds, poll_handles_data_len, timeout_ms);
+	result_poll = ipc_poll_fds (poll_fds, count, timeout_ms);
+	if (result_poll > 0 && interrupt_fd >= 0 && poll_fds [poll_handles_data_len].revents != 0) {
+		result = -2;
+		goto ep_on_exit;
+	}
 
 	// Check results
 	if (result_poll < 0) {
@@ -1270,6 +1282,62 @@ ep_on_error:
 
 	ep_exit_error_handler ();
 }
+
+int32_t
+ds_ipc_poll (
+	DiagnosticsIpcPollHandle *poll_handles_data,
+	size_t poll_handles_data_len,
+	uint32_t timeout_ms,
+	ds_ipc_error_callback_func callback)
+{
+	return ipc_poll_interruptible (poll_handles_data, poll_handles_data_len, timeout_ms, callback, -1);
+}
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+int32_t
+ds_ipc_poll_interruptible (
+	DiagnosticsIpcPollHandle *poll_handles_data,
+	size_t poll_handles_data_len,
+	uint32_t timeout_ms,
+	ds_ipc_error_callback_func callback,
+	int interrupt_fd)
+{
+	return ipc_poll_interruptible (poll_handles_data, poll_handles_data_len, timeout_ms, callback, interrupt_fd);
+}
+
+int32_t
+ds_ipc_stream_read_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	uint8_t *buffer,
+	uint32_t capacity,
+	int interrupt_fd)
+{
+	EP_ASSERT (capacity > 0 && capacity <= INT_MAX);
+	IpcSocketDeadline deadline;
+	ipc_deadline_init (&deadline, IPC_TIMEOUT_INFINITE);
+	for (;;) {
+		ds_ipc_pollfd_t descriptors [2];
+		descriptors [0].fd = ipc_stream->client_socket;
+		descriptors [0].events = POLLIN;
+		descriptors [0].revents = 0;
+		descriptors [1].fd = interrupt_fd;
+		descriptors [1].events = POLLIN;
+		descriptors [1].revents = 0;
+		int result = ipc_poll_fds_with_deadline (descriptors, 2, &deadline);
+		if (result < 0)
+			return -1;
+
+		if (descriptors [1].revents != 0)
+			return -2;
+
+		ssize_t received = recv (ipc_stream->client_socket, buffer, capacity, 0);
+		if (ipc_retry_syscall (received) || (received == -1 && ipc_socket_would_block ()))
+			continue;
+
+		return (int32_t)received;
+	}
+}
+#endif
 
 bool
 ds_ipc_listen (

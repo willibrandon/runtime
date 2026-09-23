@@ -827,7 +827,7 @@ bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void*
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
 }
 
-bool PalStartJoinableGCThread(BackgroundCallback callback, void* context, void** handle)
+bool PalStartJoinableThread(BackgroundCallback callback, void* context, void** handle)
 {
     pthread_t* thread = new (nothrow) pthread_t;
     if (thread == nullptr)
@@ -845,7 +845,7 @@ bool PalStartJoinableGCThread(BackgroundCallback callback, void* context, void**
     return true;
 }
 
-bool PalJoinGCThread(void* handle)
+bool PalJoinThread(void* handle)
 {
     pthread_t* thread = static_cast<pthread_t*>(handle);
     if (thread == nullptr || pthread_join(*thread, nullptr) != 0)

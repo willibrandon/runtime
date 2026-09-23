@@ -1,4 +1,4 @@
-# Diagnostics endpoint cleanup checks
+# Diagnostics listener and transport checks
 
 This Linux x64 component probe loads Native AOT with `EventSourceSupport=true`.
 An external client sends real `ProcessInfo2` requests and verifies the PID, runtime
@@ -28,6 +28,7 @@ python3 run.py --host ./host --library publish/NativeDiagnosticsProbe.so --outpu
 python3 io.py --host ./host --library publish/NativeDiagnosticsProbe.so --output io-results
 python3 connect.py --host ./host --library publish/NativeDiagnosticsProbe.so --output connect-results
 python3 reverse.py --host ./host --library publish/NativeDiagnosticsProbe.so --output reverse-results
+python3 listener.py --host ./host --library publish/NativeDiagnosticsProbe.so --output listener-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
@@ -59,8 +60,16 @@ must keep answering `ProcessInfo2` requests. After the queue is emptied, three
 successive reverse connections must advertise the same runtime identity and
 answer complete protocol requests.
 
+`listener.py` stops and joins the real diagnostic listener, verifies that its
+kernel thread has exited, and starts a replacement. It checks idle connections,
+partial headers and payloads, malformed requests, and clients closing during a
+pause. Requests queued during a pause must wait for restart. Completed requests
+must retain exact values, process identity and endpoint ownership. Reverse
+connections also preserve partial requests and reconnect afterward. Twenty idle
+cycles check that stopping and restarting does not leak descriptors.
+
 The compiler's existing native-library EventSource warning remains visible. These
-checks exercise native endpoint cleanup only: no managed code runs in the forked
-children, and enabled-diagnostics fork support still returns its existing rejection.
-Trace sessions, sampling, listener retirement/restart, multiple runtime instances
-and managed child execution remain part of the unfinished diagnostics work.
+checks do not enable managed fork support with diagnostics. Native cleanup tests
+fork without managed child calls; listener tests stop and restart without forking.
+Commands already sending responses, active trace sessions, sampling, child
+recovery and multiple runtime instances still need fork-aware lifetimes.

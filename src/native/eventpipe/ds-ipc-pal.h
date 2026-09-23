@@ -56,6 +56,25 @@ ds_ipc_poll (
 	uint32_t timeout_ms,
 	ds_ipc_error_callback_func callback);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// A caller-owned wake descriptor interrupts only this poll, preserving all sockets.
+int32_t
+ds_ipc_poll_interruptible (
+	DiagnosticsIpcPollHandle *poll_handles_data,
+	size_t poll_handles_data_len,
+	uint32_t timeout_ms,
+	ds_ipc_error_callback_func callback,
+	int interrupt_fd);
+
+// Returns bytes received, zero on EOF, -1 on error, or -2 on interruption.
+int32_t
+ds_ipc_stream_read_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	uint8_t *buffer,
+	uint32_t capacity,
+	int interrupt_fd);
+#endif
+
 // puts the DiagnosticsIpc into Listening Mode
 // Re-entrant safe
 bool

@@ -36,8 +36,13 @@ def process_info(endpoint, expected_pid):
 
 
 def process_info_stream(connection, expected_pid):
-    """Decode ProcessInfo2 and independently verify identity and every field boundary."""
+    """Send ProcessInfo2 and verify the complete response."""
     connection.sendall(HEADER.pack(MAGIC, HEADER.size, 4, 4, 0))
+    return process_info_response(connection, expected_pid)
+
+
+def process_info_response(connection, expected_pid):
+    """Decode ProcessInfo2 and independently verify identity and every field boundary."""
     magic, size, command_set, command, reserved = HEADER.unpack(receive(connection, HEADER.size))
     assert (magic, command_set, command, reserved) == (MAGIC, 255, 0, 0)
     assert HEADER.size + 24 <= size <= 65535

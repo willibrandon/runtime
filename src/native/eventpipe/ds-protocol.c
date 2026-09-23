@@ -386,6 +386,48 @@ ds_ipc_message_initialize_stream (
 	return ipc_message_try_parse (message, stream);
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+int32_t
+ds_ipc_message_resume_stream (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	uint32_t *received,
+	int interrupt_fd)
+{
+	const uint32_t header_size = sizeof (message->header);
+	while (*received < header_size) {
+		int32_t count = ds_ipc_stream_read_interruptible (stream,
+			(uint8_t *)&message->header + *received, header_size - *received, interrupt_fd);
+		if (count <= 0)
+			return count == -2 ? -2 : 0;
+
+		*received += (uint32_t)count;
+	}
+
+	message->size = ep_rt_val_uint16_t (message->header.size);
+	if (message->size < header_size)
+		return 0;
+
+	uint32_t payload_size = message->size - header_size;
+	if (payload_size != 0 && message->data == NULL) {
+		message->data = ep_rt_byte_array_alloc (payload_size);
+		if (message->data == NULL)
+			return 0;
+	}
+
+	while (*received < message->size) {
+		int32_t count = ds_ipc_stream_read_interruptible (stream,
+			message->data + (*received - header_size), message->size - *received, interrupt_fd);
+		if (count <= 0)
+			return count == -2 ? -2 : 0;
+
+		*received += (uint32_t)count;
+	}
+
+	return 1;
+}
+#endif
+
 bool
 ds_ipc_message_try_parse_value (
 	uint8_t **buffer,

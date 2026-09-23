@@ -18,6 +18,7 @@ typedef int (*listen_failure_fn)(const char*);
 typedef int32_t (*enable_fn)(void);
 typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
 typedef int (*connect_fn)(const char*, uint32_t);
+typedef uint32_t (*listener_fn)(bool);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -70,6 +71,7 @@ main(int argc, char **argv)
     enable_fn enable = (enable_fn) dlsym(library, "RhEnableForkSupport");
     stream_io_fn stream_io = (stream_io_fn) dlsym(library, "ankus_probe_stream_io");
     connect_fn connect_client = (connect_fn) dlsym(library, "ankus_probe_connect");
+    listener_fn listener_checkpoint = (listener_fn) dlsym(library, "ankus_probe_listener_checkpoint");
     if (initialize == NULL || shutdown_server == NULL || listen_failure == NULL || enable == NULL || initialize(getpid(), report) != 0)
     {
         return 71;
@@ -125,6 +127,20 @@ main(int argc, char **argv)
         else if (command[0] == 'q')
         {
             return 0;
+        }
+        else if (command[0] == 'p' || command[0] == 'r')
+        {
+            if (listener_checkpoint == NULL)
+            {
+                return 76;
+            }
+
+            printf("listener %u\n", listener_checkpoint(command[0] == 'p'));
+        }
+        else if (command[0] == 'v')
+        {
+            const char* value = getenv("ANKUS_LISTENER_CHECKPOINT");
+            printf("environment %s\n", value == NULL ? "<unset>" : value);
         }
         else if (command[0] == 'k')
         {
