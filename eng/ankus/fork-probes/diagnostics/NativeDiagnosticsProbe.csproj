@@ -39,8 +39,11 @@
     <LinkerArg Include="-Wl,--wrap=calloc" />
     <LinkerArg Include="-Wl,--wrap=malloc" />
     <LinkerArg Include="-Wl,--wrap=realloc" />
+    <LinkerArg Include="-Wl,--wrap=send" />
     <LinkerArg Include="-Wl,--wrap=strdup" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_trace_ownership" />
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_block_sends" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_trace_ownership" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_block_sends" />
   </ItemGroup>
 </Project>

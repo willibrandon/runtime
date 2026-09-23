@@ -6,21 +6,24 @@ import concurrent.futures
 import json
 import os
 from pathlib import Path
+import select
 import signal
 import socket
 import struct
 import subprocess
 import tempfile
+import time
 
 from connect import read_line
-from listener import command, encoded_string, pause, resume, status_response
+from listener import command, encoded_string, listener_threads, pause, resume, status_response
 from run import HEADER, MAGIC, process_info, receive
 
 
 CASES = [f"collect-{version}-malformed" for version in range(1, 6)] + [
     "stop-empty", "stop-short", "stop-long", "stop-unknown", "descriptor-eof",
-    "descriptor-extra", "descriptor-invalid", "session-lifetime", "session-capacity",
-    "allocation-file", "allocation-serializer", "allocation-session"]
+    "descriptor-extra", "descriptor-invalid", "descriptor-pause", "start-response-pause",
+    "session-lifetime", "session-capacity", "allocation-file", "allocation-serializer",
+    "allocation-session"]
 BAD_ENCODING = 0x80131384
 FAIL = 0x80004005
 
@@ -95,6 +98,100 @@ def parse_ownership(process, kind, fail_index):
     values = list(map(int, fields[2:]))
     assert len(values) == 6, values
     return values
+
+
+def pause_once(process, evidence):
+    """Pause at the current boundary and prove the listener thread has retired."""
+    before = listener_threads(process.pid)
+    response = command(process, "p")
+    assert response.startswith("listener "), response
+    count = int(response.split()[1])
+    deadline = time.monotonic() + 2
+    remaining = listener_threads(process.pid)
+    while remaining:
+        snapshots = {}
+        for tid in remaining:
+            try:
+                snapshot = Path(f"/proc/{process.pid}/task/{tid}/stat").read_text()
+                flags = int(snapshot.rpartition(") ")[2].split()[6])
+                assert flags & 4, "joined listener has not entered kernel exit"
+                snapshots[str(tid)] = snapshot
+            except FileNotFoundError:
+                snapshots[str(tid)] = "exited before stat read"
+        evidence.setdefault("kernel_exit_observations", []).append(snapshots)
+        assert time.monotonic() < deadline, "joined listener remained in the kernel task list"
+        time.sleep(0.001)
+        remaining = listener_threads(process.pid)
+    evidence["checkpoints"].append({"received": count, "retired_threads": before})
+    return count
+
+
+def set_send_blocked(process, blocked):
+    """Control the fixture's link-time send boundary without changing runtime code."""
+    expected = 1 if blocked else 0
+    assert command(process, f"w {expected}") == f"send-blocked {expected}"
+
+
+def run_descriptor_pause(process, endpoint, evidence):
+    """Pause repeatedly while CollectTracing waits for its ancillary descriptor."""
+    body = collect_body(True)
+    with connect(endpoint) as peer:
+        request(peer, 6, body)
+        expected = HEADER.size + len(body)
+        pause(process, expected, evidence)
+        assert command(process, "o") == "pending 0"
+        resume(process)
+        pause(process, expected, evidence)
+        assert command(process, "o") == "pending 0"
+        with open("/dev/null", "rb") as source:
+            peer.sendmsg([b"x"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS,
+                                    array.array("i", [source.fileno()]))])
+        assert not select.select([peer], [], [], 0.1)[0], "paused command produced a response"
+        resume(process)
+        status_response(peer, FAIL)
+    evidence["requests"].append({"bytes": expected, "pauses": 2})
+
+
+def run_start_response_pause(process, endpoint, evidence):
+    """Pause a successful trace after enable but before its start reply is delivered."""
+    body = collect_body()
+    blocked = False
+    paused = False
+    with connect(endpoint) as peer:
+        try:
+            set_send_blocked(process, True)
+            blocked = True
+            request(peer, 6, body)
+            deadline = time.monotonic() + 2
+            while True:
+                time.sleep(0.005)
+                pause_once(process, evidence)
+                paused = True
+                response = command(process, "o")
+                assert response.startswith("pending "), response
+                pending = int(response.split()[1])
+                evidence.setdefault("pending_responses", []).append(pending)
+                if pending == HEADER.size + 8:
+                    break
+                assert time.monotonic() < deadline, "start response did not reach the resumable handoff"
+                resume(process)
+                paused = False
+
+            assert not select.select([peer], [], [], 0.1)[0], "paused start response reached the client"
+            set_send_blocked(process, False)
+            blocked = False
+            resume(process, 2)
+            paused = False
+            with concurrent.futures.ThreadPoolExecutor(max_workers=1) as readers:
+                session_id = session_reply(peer)
+                reader = readers.submit(drain_trace, peer)
+                stop(endpoint, session_id)
+                evidence["requests"].append({"session": session_id, "bytes": reader.result(timeout=4)})
+        finally:
+            if blocked and process.poll() is None:
+                set_send_blocked(process, False)
+            if paused and process.poll() is None:
+                resume(process)
 
 
 def allocation_observation(args, case, kind, fail_index, label, evidence):
@@ -187,7 +284,11 @@ def run_case(args, case):
                 identity = process_info(endpoint, process.pid)
                 fd_count = len(list(Path(f"/proc/{process.pid}/fd").iterdir()))
                 evidence["fds_before"] = fd_count
-                if case.startswith("session-"):
+                if case == "descriptor-pause":
+                    run_descriptor_pause(process, endpoint, evidence)
+                elif case == "start-response-pause":
+                    run_start_response_pause(process, endpoint, evidence)
+                elif case.startswith("session-"):
                     count = 64 if case == "session-capacity" else 1
                     rounds = 1 if count == 64 else 20
                     for _ in range(rounds):

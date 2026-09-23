@@ -1572,7 +1572,8 @@ static bool ipc_stream_capture_response (DiagnosticsIpcStream *stream, const uin
 
 void ds_ipc_stream_begin_response (DiagnosticsIpcStream *stream)
 {
-	EP_ASSERT (!stream->response_buffered && stream->response_head == NULL);
+	EP_ASSERT (!stream->response_buffered && stream->response_head == NULL && stream->response_tail == NULL);
+	EP_ASSERT (stream->response_remaining == 0 && !stream->response_failed);
 	stream->response_buffered = true;
 }
 
@@ -1625,7 +1626,7 @@ int32_t ds_ipc_stream_resume_response (DiagnosticsIpcStream *stream, int interru
 	return 1;
 }
 
-void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream)
+void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream, bool release_stream)
 {
 	while (stream->response_head != NULL) {
 		DiagnosticsIpcResponseChunk *chunk = stream->response_head;
@@ -1634,8 +1635,12 @@ void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream)
 		ep_rt_object_free (chunk);
 	}
 
+	stream->response_tail = NULL;
+	stream->response_remaining = 0;
+	stream->response_failed = false;
 	stream->response_buffered = false;
-	ds_ipc_stream_free (stream);
+	if (release_stream)
+		ds_ipc_stream_free (stream);
 }
 #endif
 
@@ -1821,10 +1826,11 @@ ds_ipc_stream_read (
 }
 
 #if HAVE_SYS_SOCKET_H && defined(SOL_SOCKET) && defined(SCM_RIGHTS) && defined(CMSG_SPACE) && defined(CMSG_FIRSTHDR) && defined(CMSG_DATA)
-bool
-ds_ipc_stream_read_fd (
+static int32_t
+ipc_stream_read_fd (
 	DiagnosticsIpcStream *ipc_stream,
-	int *data_fd)
+	int *data_fd,
+	int interrupt_fd)
 {
 	EP_ASSERT (ipc_stream != NULL);
 	EP_ASSERT (data_fd != NULL);
@@ -1853,8 +1859,26 @@ ds_ipc_stream_read_fd (
 	IpcSocketDeadline deadline;
 	ipc_deadline_init (&deadline, IPC_TIMEOUT_INFINITE);
 	for (;;) {
-		if (!ipc_socket_wait (ipc_stream->client_socket, POLLIN, &deadline))
-			return false;
+		if (interrupt_fd >= 0) {
+			ds_ipc_pollfd_t descriptors [2];
+			descriptors [0].fd = ipc_stream->client_socket;
+			descriptors [0].events = POLLIN;
+			descriptors [0].revents = 0;
+			descriptors [1].fd = interrupt_fd;
+			descriptors [1].events = POLLIN;
+			descriptors [1].revents = 0;
+			int poll_result = ipc_poll_fds_with_deadline (descriptors, 2, &deadline);
+			if (poll_result < 0)
+				return 0;
+
+			if (descriptors [1].revents != 0)
+				return -2;
+
+			if (descriptors [0].revents == 0)
+				continue;
+		} else if (!ipc_socket_wait (ipc_stream->client_socket, POLLIN, &deadline)) {
+			return 0;
+		}
 
 		msg.msg_controllen = sizeof (control.bytes);
 		msg.msg_flags = 0;
@@ -1863,7 +1887,7 @@ ds_ipc_stream_read_fd (
 			continue;
 
 		if (res <= 0)
-			return false;
+			return 0;
 
 		break;
 	}
@@ -1902,19 +1926,38 @@ ds_ipc_stream_read_fd (
 		if (received_fd >= 0)
 			ipc_socket_close (received_fd);
 
-		return false;
+		return 0;
 	}
 
 #ifndef MSG_CMSG_CLOEXEC
 	int descriptor_flags = fcntl (received_fd, F_GETFD, 0);
 	if (descriptor_flags == -1 || fcntl (received_fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == -1) {
 		ipc_socket_close (received_fd);
-		return false;
+		return 0;
 	}
 #endif
 	*data_fd = received_fd;
-	return true;
+	return 1;
 }
+
+bool
+ds_ipc_stream_read_fd (
+	DiagnosticsIpcStream *ipc_stream,
+	int *data_fd)
+{
+	return ipc_stream_read_fd (ipc_stream, data_fd, -1) == 1;
+}
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+int32_t
+ds_ipc_stream_read_fd_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	int *data_fd,
+	int interrupt_fd)
+{
+	return ipc_stream_read_fd (ipc_stream, data_fd, interrupt_fd);
+}
+#endif
 #else // HAVE_SYS_SOCKET_H && defined(SOL_SOCKET) && defined(SCM_RIGHTS) && defined(CMSG_SPACE) && defined(CMSG_FIRSTHDR) && defined(CMSG_DATA)
 bool
 ds_ipc_stream_read_fd (
@@ -1924,6 +1967,20 @@ ds_ipc_stream_read_fd (
 	// Not supported
 	return false;
 }
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+int32_t
+ds_ipc_stream_read_fd_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	int *data_fd,
+	int interrupt_fd)
+{
+	(void)ipc_stream;
+	(void)data_fd;
+	(void)interrupt_fd;
+	return 0;
+}
+#endif
 #endif // HAVE_SYS_SOCKET_H && defined(SOL_SOCKET) && defined(SCM_RIGHTS) && defined(CMSG_SPACE) && defined(CMSG_FIRSTHDR) && defined(CMSG_DATA)
 
 bool

@@ -95,5 +95,17 @@ ds_eventpipe_protocol_helper_handle_ipc_message (
 	DiagnosticsIpcMessage *message,
 	DiagnosticsIpcStream *stream);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// Returns 1 when complete, 0 after a handled failure, or -2 when descriptor
+// receipt is interrupted. The payload remains owned by the caller across pause.
+int32_t
+ds_eventpipe_protocol_helper_resume_ipc_message (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	EventPipeCollectTracingCommandPayload **payload,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id);
+#endif
+
 #endif /* ENABLE_PERFTRACING */
 #endif /* __DIAGNOSTICS_EVENTPIPE_PROTOCOL_H__ */

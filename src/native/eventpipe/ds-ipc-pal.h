@@ -74,14 +74,22 @@ ds_ipc_stream_read_interruptible (
 	uint32_t capacity,
 	int interrupt_fd);
 
-// The listener owns the stream during capture and drain. Only use for command
-// handlers which do not transfer their stream to a tracing session.
+// Returns 1 with one received descriptor, 0 on error/EOF, or -2 on interruption.
+int32_t
+ds_ipc_stream_read_fd_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	int *data_fd,
+	int interrupt_fd);
+
+// The listener owns the stream during response capture and drain. A handler may
+// transfer the stream only after the complete response has been delivered.
 void ds_ipc_stream_begin_response (DiagnosticsIpcStream *stream);
 // Returns 1 when sent, 0 on failure, or -2 on pause; unsent bytes remain owned.
 int32_t ds_ipc_stream_resume_response (DiagnosticsIpcStream *stream, int interrupt_fd);
 uint64_t ds_ipc_stream_response_remaining (DiagnosticsIpcStream *stream);
-// Discards any remaining bytes and releases the listener's stream ownership.
-void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream);
+// Discards queued bytes and optionally releases the stream. A tracing session
+// retains its stream after the listener has delivered the start response.
+void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream, bool release_stream);
 #endif
 
 // puts the DiagnosticsIpc into Listening Mode

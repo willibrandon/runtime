@@ -22,6 +22,7 @@ typedef int (*connect_fn)(const char*, uint32_t);
 typedef uint32_t (*listener_fn)(bool);
 typedef uint64_t (*pending_response_fn)(void);
 typedef int (*trace_ownership_fn)(int, int, uint64_t*);
+typedef int (*block_sends_fn)(int);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -82,6 +83,7 @@ main(int argc, char **argv)
     }
 
     trace_ownership_fn trace_ownership = (trace_ownership_fn) dlsym(library, "ankus_probe_trace_ownership");
+    block_sends_fn block_sends = (block_sends_fn) dlsym(library, "ankus_probe_block_sends");
 
     printf("ready %d\n", (int) getpid());
     fflush(stdout);
@@ -195,6 +197,16 @@ main(int argc, char **argv)
             }
 
             printf("\n");
+        }
+        else if (command[0] == 'w')
+        {
+            int block;
+            if (block_sends == NULL || sscanf(command + 1, "%d", &block) != 1)
+            {
+                return 76;
+            }
+
+            printf("send-blocked %d\n", block_sends(block));
         }
         else if (command[0] == 'i')
         {

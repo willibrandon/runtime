@@ -39,16 +39,22 @@ def listener_threads(pid):
     return result
 
 
-def resume(process):
-    """Wait for the replacement listener to start before the next observation."""
+def resume(process, expected_threads=1):
+    """Wait for the replacement listener and any expected session thread."""
     assert command(process, "r") == "listener 0"
     deadline = time.monotonic() + 2
     while time.monotonic() < deadline:
         threads = listener_threads(process.pid)
-        if len(threads) == 1:
+        if len(threads) == expected_threads:
             return threads[0]
         time.sleep(0.002)
-    raise AssertionError("replacement listener did not start")
+    tasks = {}
+    for path in Path(f"/proc/{process.pid}/task").glob("*/comm"):
+        try:
+            tasks[path.parent.name] = path.read_text().strip()
+        except FileNotFoundError:
+            pass
+    raise AssertionError(f"expected {expected_threads} EventPipe threads after resume: {tasks}")
 
 
 def pause(process, expected, evidence):

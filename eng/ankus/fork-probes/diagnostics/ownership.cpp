@@ -3,15 +3,19 @@
 #include <eventpipe/ep.h>
 #include <eventpipe/ep-file.h>
 #include <eventpipe/ep-ipc-stream.h>
+#include <atomic>
+#include <cerrno>
 #include <dlfcn.h>
 #include <new>
 #include <cstdlib>
+#include <sys/socket.h>
 
 static thread_local bool observe_allocations;
 static thread_local int fail_index;
 static thread_local uint64_t allocations;
 static thread_local uint64_t failures;
 static thread_local uint64_t failure_offset;
+static std::atomic<bool> block_sends;
 
 static bool fail_allocation(void* return_address)
 {
@@ -41,6 +45,7 @@ extern "C" void* __real__ZnamRKSt9nothrow_t(size_t size, const std::nothrow_t& t
 extern "C" void* __real_calloc(size_t count, size_t size) noexcept;
 extern "C" void* __real_malloc(size_t size) noexcept;
 extern "C" void* __real_realloc(void* memory, size_t size) noexcept;
+extern "C" ssize_t __real_send(int socket, const void* buffer, size_t length, int flags) noexcept;
 extern "C" char* __real_strdup(const char* value) noexcept;
 
 extern "C" void* __wrap_malloc(size_t size) noexcept
@@ -51,6 +56,17 @@ extern "C" void* __wrap_malloc(size_t size) noexcept
 extern "C" void* __wrap_realloc(void* memory, size_t size) noexcept
 {
     return fail_allocation(__builtin_return_address(0)) ? nullptr : __real_realloc(memory, size);
+}
+
+extern "C" ssize_t __wrap_send(int socket, const void* buffer, size_t length, int flags) noexcept
+{
+    if (block_sends.load())
+    {
+        errno = EAGAIN;
+        return -1;
+    }
+
+    return __real_send(socket, buffer, length, flags);
 }
 
 extern "C" char* __wrap_strdup(const char* value) noexcept
@@ -71,6 +87,12 @@ extern "C" void* __wrap__ZnamRKSt9nothrow_t(size_t size, const std::nothrow_t& t
 extern "C" void* __wrap_calloc(size_t count, size_t size) noexcept
 {
     return fail_allocation(__builtin_return_address(0)) ? nullptr : __real_calloc(count, size);
+}
+
+extern "C" __attribute__((visibility("default"))) int ankus_probe_block_sends(int block)
+{
+    block_sends.store(block != 0);
+    return block_sends.load() ? 1 : 0;
 }
 
 struct ObservedWriter

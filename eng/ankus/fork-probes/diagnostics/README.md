@@ -84,7 +84,8 @@ within a bounded wait before checking the paused state.
 The compiler's existing native-library EventSource warning remains visible. These
 checks do not enable managed fork support with diagnostics. Native cleanup tests
 fork without managed child calls; listener tests stop and restart without forking.
-Ordinary command responses now preserve queued output. Tracing commands transfer
-their connection to a session and still need that ownership handoff, interruptible
-descriptor receipt, active-session/sampling lifetimes, child recovery and support
-for multiple runtime instances.
+Command and tracing responses now preserve queued output. Linux UserEvents
+descriptor receipt can also stop and resume with the listener. A tracing session
+starts only after its complete success response is delivered. Active tracing and
+sampling threads still need fork quiescence, child recovery and support for
+multiple runtime instances.

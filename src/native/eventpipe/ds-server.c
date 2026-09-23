@@ -24,6 +24,8 @@ static volatile uint32_t _server_pausing;
 static bool _server_paused;
 static DiagnosticsIpcStream *_server_pending_stream;
 static DiagnosticsIpcStream *_server_response_stream;
+static EventPipeCollectTracingCommandPayload *_server_eventpipe_payload;
+static EventPipeSessionID _server_response_session_id;
 static DiagnosticsIpcMessage _server_pending_message;
 static uint32_t _server_received;
 
@@ -161,13 +163,42 @@ static size_t server_loop_tick (void* data) {
 	if (ep_rt_volatile_load_uint32_t (&_server_pausing) != 0)
 		return 1;
 
+	if (_server_eventpipe_payload != NULL) {
+		EventPipeSessionID pending_session_id = 0;
+		int32_t result = ds_eventpipe_protocol_helper_resume_ipc_message (
+			&_server_pending_message,
+			_server_pending_stream,
+			&_server_eventpipe_payload,
+			_server_interrupt [0],
+			&pending_session_id);
+		if (result == -2)
+			return 1;
+
+		_server_pending_stream = NULL;
+		_server_received = 0;
+		ds_ipc_message_fini (&_server_pending_message);
+		if (pending_session_id != 0)
+			_server_response_session_id = pending_session_id;
+
+		return 0;
+	}
+
 	if (_server_response_stream != NULL) {
 		int32_t result = ds_ipc_stream_resume_response (_server_response_stream, _server_interrupt [0]);
 		if (result == -2)
 			return 1;
 
-		ds_ipc_stream_end_response (_server_response_stream);
+		EventPipeSessionID pending_session_id = _server_response_session_id;
+		ds_ipc_stream_end_response (_server_response_stream, pending_session_id == 0);
 		_server_response_stream = NULL;
+		_server_response_session_id = 0;
+		if (pending_session_id != 0) {
+			if (result == 1)
+				ep_start_streaming (pending_session_id);
+			else
+				ep_disable (pending_session_id);
+		}
+
 		return 0;
 	}
 
@@ -188,9 +219,9 @@ static size_t server_loop_tick (void* data) {
 	if (read_result == -2 || ep_rt_volatile_load_uint32_t (&_server_pausing) != 0)
 		return 1;
 
-	_server_pending_stream = NULL;
-	_server_received = 0;
 	if (read_result == 0) {
+		_server_pending_stream = NULL;
+		_server_received = 0;
 		server_begin_response (stream);
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
 		ds_ipc_stream_free (stream);
@@ -222,10 +253,13 @@ static size_t server_loop_tick (void* data) {
 		(const ep_char8_t *)ds_ipc_header_get_magic_ref (ds_ipc_message_get_header_ref (message)),
 		(const ep_char8_t *)DOTNET_IPC_V1_MAGIC) == 0;
 #ifdef DS_NATIVEAOT_FORK_LISTENER
-	// Tracing commands can transfer the connection to a session. Their lifetime
-	// needs a separate handoff; ordinary command responses remain listener-owned.
-	if (!valid_magic || ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (message)) != DS_SERVER_COMMANDSET_EVENTPIPE)
+	bool is_eventpipe = valid_magic &&
+		ds_ipc_header_get_commandset (ds_ipc_message_get_header_ref (message)) == DS_SERVER_COMMANDSET_EVENTPIPE;
+	if (!is_eventpipe) {
+		_server_pending_stream = NULL;
+		_server_received = 0;
 		server_begin_response (stream);
+	}
 #endif
 	if (!valid_magic) {
 
@@ -241,9 +275,28 @@ static size_t server_loop_tick (void* data) {
 	case DS_SERVER_COMMANDSET_DUMP:
 		ds_dump_protocol_helper_handle_ipc_message (message, stream);
 		break;
-	case DS_SERVER_COMMANDSET_EVENTPIPE:
+	case DS_SERVER_COMMANDSET_EVENTPIPE: {
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		server_begin_response (stream);
+		EventPipeSessionID pending_session_id = 0;
+		int32_t eventpipe_result = ds_eventpipe_protocol_helper_resume_ipc_message (
+			message,
+			stream,
+			&_server_eventpipe_payload,
+			_server_interrupt [0],
+			&pending_session_id);
+		if (eventpipe_result == -2)
+			return 1;
+
+		_server_pending_stream = NULL;
+		_server_received = 0;
+		if (pending_session_id != 0)
+			_server_response_session_id = pending_session_id;
+#else
 		ds_eventpipe_protocol_helper_handle_ipc_message (message, stream);
+#endif
 		break;
+	}
 	case DS_SERVER_COMMANDSET_PROFILER:
 		ds_profiler_protocol_helper_handle_ipc_message (message, stream);
 		break;
