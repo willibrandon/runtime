@@ -1,4 +1,6 @@
+using System.Runtime.CompilerServices;
 using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
 
 namespace NativeForkProbe;
 
@@ -7,6 +9,27 @@ namespace NativeForkProbe;
 /// </summary>
 internal static unsafe class RegisteredWaitProbe
 {
+    /// <summary>
+    /// Selects the caller that unregisters after native wait-thread retirement.
+    /// </summary>
+    internal enum RetirementCaller
+    {
+        /// <summary>
+        /// Leaves all cleanup to the ordinary post-fork checks.
+        /// </summary>
+        None,
+
+        /// <summary>
+        /// Unregisters from an occupied pool worker during retirement.
+        /// </summary>
+        Worker,
+
+        /// <summary>
+        /// Uses blocking unregister from an actual managed finalizer during retirement.
+        /// </summary>
+        Finalizer,
+    }
+
     /// <summary>
     /// Exceeds one portable wait thread's sixty-three user slots.
     /// </summary>
@@ -58,6 +81,16 @@ internal static unsafe class RegisteredWaitProbe
     private static bool s_checkRetirement;
 
     /// <summary>
+    /// Records the selected cleanup caller without recreating it after fork.
+    /// </summary>
+    private static RetirementCaller s_retirementCaller;
+
+    /// <summary>
+    /// Observes collection of the original unreachable finalizable object.
+    /// </summary>
+    private static WeakReference? s_finalizerReference;
+
+    /// <summary>
     /// Records completion of unregister operations while framework activation is closed.
     /// </summary>
     private static int s_retirementResult;
@@ -77,9 +110,9 @@ internal static unsafe class RegisteredWaitProbe
     /// </summary>
     /// <param name="token">The identity already stored by the native host.</param>
     /// <param name="control">The process-lifetime native observation callback.</param>
-    /// <param name="checkRetirement">Whether to unregister from an active worker after wait-thread retirement.</param>
+    /// <param name="caller">The optional active worker or finalizer that unregisters after wait-thread retirement.</param>
     /// <returns>Zero after setup and completed cancellation.</returns>
-    internal static int Prepare(Guid token, delegate* unmanaged[Cdecl]<int, int, long, long> control, bool checkRetirement)
+    internal static int Prepare(Guid token, delegate* unmanaged[Cdecl]<int, int, long, long> control, RetirementCaller caller)
     {
         if (s_root.IsAllocated)
         {
@@ -89,10 +122,12 @@ internal static unsafe class RegisteredWaitProbe
         s_control = control;
         s_token = token;
         s_marker = 73;
-        s_checkRetirement = checkRetirement;
+        s_checkRetirement = caller != RetirementCaller.None;
+        s_retirementCaller = caller;
+        s_finalizerReference = null;
         s_retirementResult = 0;
         s_unexpectedCallbacks = 0;
-        s_states = new WaitState[CancelledIndex + (checkRetirement ? 2 : 1)];
+        s_states = new WaitState[CancelledIndex + (s_checkRetirement ? 2 : 1)];
         s_root = GCHandle.Alloc(s_states);
         for (int index = 0; index < s_states.Length; index++)
         {
@@ -119,9 +154,14 @@ internal static unsafe class RegisteredWaitProbe
             return 141;
         }
 
-        if (checkRetirement)
+        if (s_checkRetirement)
         {
-            if (!ThreadPool.QueueUserWorkItem(static _ => UnregisterAfterRetirement()))
+            if (caller == RetirementCaller.Finalizer)
+            {
+                s_finalizerReference = CreateFinalizer();
+                GC.Collect(GC.MaxGeneration, GCCollectionMode.Forced, blocking: true, compacting: true);
+            }
+            else if (!ThreadPool.QueueUserWorkItem(static _ => UnregisterAfterRetirement()))
             {
                 return 149;
             }
@@ -156,7 +196,15 @@ internal static unsafe class RegisteredWaitProbe
 
             using var removed = new ManualResetEvent(false);
             RegisteredWaitHandle inherited = s_states[CancelledIndex + 1].Registration!;
-            if (!inherited.Unregister(removed) || !removed.WaitOne(2000) || inherited.Unregister(null))
+            if (s_retirementCaller == RetirementCaller.Finalizer)
+            {
+                using var blocking = new BlockingUnregisterHandle();
+                if (Thread.CurrentThread.IsThreadPoolThread || !inherited.Unregister(blocking) || inherited.Unregister(null))
+                {
+                    return;
+                }
+            }
+            else if (!inherited.Unregister(removed) || !removed.WaitOne(2000) || inherited.Unregister(null))
             {
                 return;
             }
@@ -211,7 +259,9 @@ internal static unsafe class RegisteredWaitProbe
             BitConverter.ToInt64(bytes[..8]) != s_control(12, 0, 0) ||
             BitConverter.ToInt64(bytes[8..]) != s_control(12, 1, 0) ||
             Volatile.Read(ref s_retirementResult) != (s_checkRetirement ? 1 : 0) ||
-            Volatile.Read(ref s_unexpectedCallbacks) != 0)
+            Volatile.Read(ref s_unexpectedCallbacks) != 0 ||
+            (s_retirementCaller == RetirementCaller.Finalizer &&
+             (s_finalizerReference is null || s_finalizerReference.IsAlive)))
         {
             return 142;
         }
@@ -228,6 +278,7 @@ internal static unsafe class RegisteredWaitProbe
         {
             s_states[index].Signal.Set();
         }
+
         for (int index = 0; index < SignalCount; index++)
         {
             s_states[index].Signal.Set();
@@ -298,6 +349,38 @@ internal static unsafe class RegisteredWaitProbe
         }
 
         return s_control(6, index, 0) == expected;
+    }
+
+    /// <summary>
+    /// Makes the cleanup object unreachable before collection without keeping it on the caller's stack.
+    /// </summary>
+    /// <returns>A short weak reference which must be cleared before finalizer completion.</returns>
+    [MethodImpl(MethodImplOptions.NoInlining)]
+    private static WeakReference CreateFinalizer() => new(new RetirementFinalizer());
+
+    /// <summary>
+    /// Runs unregister only when the runtime executes an actual finalizer.
+    /// </summary>
+    private sealed class RetirementFinalizer
+    {
+        /// <summary>
+        /// Removes the original wait after native wait-thread exit while fork preparation is active.
+        /// </summary>
+        ~RetirementFinalizer() => UnregisterAfterRetirement();
+    }
+
+    /// <summary>
+    /// Selects the documented blocking form of registered-wait unregister without owning a native handle.
+    /// </summary>
+    private sealed class BlockingUnregisterHandle : WaitHandle
+    {
+        /// <summary>
+        /// Initializes the invalid-handle sentinel used by the blocking unregister contract.
+        /// </summary>
+        internal BlockingUnregisterHandle()
+        {
+            SafeWaitHandle = new SafeWaitHandle(new IntPtr(-1), ownsHandle: false);
+        }
     }
 
     /// <summary>

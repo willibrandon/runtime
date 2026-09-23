@@ -29,6 +29,16 @@ public static unsafe class RetainedServicesProbe
     private const int WaitRetirementMode = 4;
 
     /// <summary>
+    /// Identifies completed waits whose callbacks and unregister notifications are still pending at fork.
+    /// </summary>
+    private const int QueuedWaitMode = 5;
+
+    /// <summary>
+    /// Identifies finalizer-driven blocking unregister after native wait-thread retirement.
+    /// </summary>
+    private const int FinalizerWaitMode = 6;
+
+    /// <summary>
     /// Counts the items enqueued from the native caller's managed setup frame.
     /// </summary>
     private const int GlobalCount = 16;
@@ -76,7 +86,7 @@ public static unsafe class RetainedServicesProbe
     /// <summary>
     /// Creates objects in the parent that must remain pending at the actual native fork snapshot.
     /// </summary>
-    /// <param name="mode">One selects a timer, two queued work, three waits, and four unregister during retirement.</param>
+    /// <param name="mode">Selects retained timers, work, waits, queued wait callbacks, or cleanup during retirement.</param>
     /// <param name="round">The exact next setup count, beginning at one.</param>
     /// <param name="control">The process-lifetime native atomic observation callback.</param>
     /// <param name="report">The synchronous native result marker callback.</param>
@@ -100,8 +110,10 @@ public static unsafe class RetainedServicesProbe
             {
                 TimerMode => PrepareTimer(token),
                 QueueMode => PrepareQueue(token),
-                WaitMode => RegisteredWaitProbe.Prepare(token, control, false),
-                WaitRetirementMode => RegisteredWaitProbe.Prepare(token, control, true),
+                WaitMode => RegisteredWaitProbe.Prepare(token, control, RegisteredWaitProbe.RetirementCaller.None),
+                WaitRetirementMode => RegisteredWaitProbe.Prepare(token, control, RegisteredWaitProbe.RetirementCaller.Worker),
+                QueuedWaitMode => QueuedWaitProbe.Prepare(token, control),
+                FinalizerWaitMode => RegisteredWaitProbe.Prepare(token, control, RegisteredWaitProbe.RetirementCaller.Finalizer),
                 _ => 102,
             };
 
@@ -119,7 +131,7 @@ public static unsafe class RetainedServicesProbe
     /// <summary>
     /// Requires completion of the same pending objects without rearming or requeueing them.
     /// </summary>
-    /// <param name="mode">One selects a timer, two queued work, three waits, and four unregister during retirement.</param>
+    /// <param name="mode">Selects retained timers, work, waits, queued wait callbacks, or cleanup during retirement.</param>
     /// <param name="round">The original setup count retained independently by native code.</param>
     /// <param name="nativePid">The current process identifier from native code.</param>
     /// <param name="parentPid">The original managed parent's native process identifier.</param>
@@ -140,7 +152,8 @@ public static unsafe class RetainedServicesProbe
             {
                 TimerMode => CheckTimer(nativePid != parentPid, report),
                 QueueMode => CheckQueue(nativePid != parentPid, report),
-                WaitMode or WaitRetirementMode => RegisteredWaitProbe.Check(nativePid, parentPid, report),
+                WaitMode or WaitRetirementMode or FinalizerWaitMode => RegisteredWaitProbe.Check(nativePid, parentPid, report),
+                QueuedWaitMode => QueuedWaitProbe.Check(nativePid, parentPid, report),
                 _ => 102,
             };
         }

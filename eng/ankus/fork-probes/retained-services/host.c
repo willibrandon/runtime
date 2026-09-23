@@ -40,7 +40,9 @@ enum retained_mode
     RETAINED_TIMER = 1,
     RETAINED_QUEUE = 2,
     RETAINED_WAITS = 3,
-    RETAINED_WAIT_RETIREMENT = 4
+    RETAINED_WAIT_RETIREMENT = 4,
+    RETAINED_QUEUED_WAITS = 5,
+    RETAINED_FINALIZER_WAIT = 6
 };
 
 enum retained_size
@@ -65,7 +67,8 @@ enum retained_command
     RETAINED_SET_TOKEN = 11,
     RETAINED_READ_TOKEN = 12,
     RETAINED_WAIT_FOR_WAITER_EXIT = 13,
-    RETAINED_UNREGISTER_COMPLETED = 14
+    RETAINED_UNREGISTER_COMPLETED = 14,
+    RETAINED_SET_QUEUED_WAIT_COUNT = 15
 };
 
 /* Host settings never change managed runtime configuration or the process environment. */
@@ -94,6 +97,7 @@ static struct
     int64_t token[2];
     int waiters_before;
     int waiters_after;
+    int64_t queued_wait_count;
     enum retained_mode mode;
     bool armed;
 } retained;
@@ -110,6 +114,11 @@ static const char *current_role = "supervisor";
 static const char *current_stage = "startup";
 static int current_round = 0;
 static const char *stage_names[] = {"invalid", "graph", "pid", "gc-finalizer", "thread-pool", "timer", "exception"};
+static const char *retained_stage_names[] =
+{
+    "invalid", "retained-timer", "retained-queue", "retained-waits",
+    "retained-wait-retirement", "retained-queued-waits", "retained-finalizer-wait"
+};
 
 /* Appends trusted fixed labels into the bounded JSON record. */
 static void
@@ -416,6 +425,10 @@ retained_control(int32_t command, int32_t index, int64_t value)
             atomic_store_explicit(&retained.ready, value == 1 ? 2 : -1, memory_order_release);
             return 1;
 
+        case RETAINED_SET_QUEUED_WAIT_COUNT:
+            retained.queued_wait_count = value;
+            return 1;
+
         default:
             return -1;
     }
@@ -471,7 +484,8 @@ capture_retained_snapshot(void)
             retained.snapshot_valid = 0;
         }
     }
-    else if (retained.mode == RETAINED_WAITS || retained.mode == RETAINED_WAIT_RETIREMENT)
+    else if (retained.mode == RETAINED_WAITS || retained.mode == RETAINED_WAIT_RETIREMENT ||
+             retained.mode == RETAINED_QUEUED_WAITS || retained.mode == RETAINED_FINALIZER_WAIT)
     {
         for (int index = 0; index < RETAINED_ITEM_COUNT; index++)
         {
@@ -481,14 +495,20 @@ capture_retained_snapshot(void)
             }
         }
 
-        if (retained.snapshot_time >= retained.timer_deadline)
+        if (retained.mode != RETAINED_QUEUED_WAITS && retained.snapshot_time >= retained.timer_deadline)
         {
             retained.snapshot_valid = 0;
         }
 
-        if (retained.mode == RETAINED_WAIT_RETIREMENT &&
+        if ((retained.mode == RETAINED_WAIT_RETIREMENT || retained.mode == RETAINED_QUEUED_WAITS ||
+             retained.mode == RETAINED_FINALIZER_WAIT) &&
             (atomic_load_explicit(&retained.ready, memory_order_acquire) != 2 ||
              retained.waiters_before < 2 || retained.waiters_after != 0))
+        {
+            retained.snapshot_valid = 0;
+        }
+
+        if (retained.mode == RETAINED_QUEUED_WAITS && retained.queued_wait_count != 70)
         {
             retained.snapshot_valid = 0;
         }
@@ -503,7 +523,8 @@ capture_retained_snapshot(void)
 static void
 release_retained_worker(void)
 {
-    if (retained.armed && (retained.mode == RETAINED_QUEUE || retained.mode == RETAINED_WAIT_RETIREMENT))
+    if (retained.armed && (retained.mode == RETAINED_QUEUE || retained.mode == RETAINED_WAIT_RETIREMENT ||
+                          retained.mode == RETAINED_QUEUED_WAITS || retained.mode == RETAINED_FINALIZER_WAIT))
     {
         atomic_store_explicit(&retained.release, 1, memory_order_release);
     }
@@ -524,6 +545,7 @@ reset_retained(enum retained_mode mode)
     retained.token[1] = 0;
     retained.waiters_before = -1;
     retained.waiters_after = -1;
+    retained.queued_wait_count = 0;
     atomic_store_explicit(&retained.ready, 0, memory_order_release);
     atomic_store_explicit(&retained.release, 0, memory_order_release);
     for (int index = 0; index < RETAINED_ITEM_COUNT; index++)
@@ -538,21 +560,28 @@ static void
 emit_retained_snapshot(void)
 {
     emit("snapshot-valid", 0, retained.snapshot_valid);
-    if (retained.mode == RETAINED_TIMER || retained.mode == RETAINED_WAITS || retained.mode == RETAINED_WAIT_RETIREMENT)
+    if (retained.mode == RETAINED_QUEUED_WAITS)
+    {
+        emit("snapshot-queued-waits", 0, retained.queued_wait_count);
+    }
+    else if (retained.mode == RETAINED_TIMER || retained.mode == RETAINED_WAITS ||
+             retained.mode == RETAINED_WAIT_RETIREMENT || retained.mode == RETAINED_FINALIZER_WAIT)
     {
         emit("snapshot-timer-count", 0, retained.snapshot_counts[0]);
         emit("snapshot-deadline-remaining-ms", 0, retained.timer_deadline - retained.snapshot_time);
-        if (retained.mode == RETAINED_WAIT_RETIREMENT)
-        {
-            emit("snapshot-waiters-before", 0, retained.waiters_before);
-            emit("snapshot-waiters-after", 0, retained.waiters_after);
-            emit("snapshot-unregister-completed", 0, atomic_load_explicit(&retained.ready, memory_order_acquire));
-        }
     }
     else
     {
         emit("snapshot-pending-global", 0, retained.pending_global);
         emit("snapshot-pending-local", 0, retained.pending_local);
+    }
+
+    if (retained.mode == RETAINED_WAIT_RETIREMENT || retained.mode == RETAINED_QUEUED_WAITS ||
+        retained.mode == RETAINED_FINALIZER_WAIT)
+    {
+        emit("snapshot-waiters-before", 0, retained.waiters_before);
+        emit("snapshot-waiters-after", 0, retained.waiters_after);
+        emit("snapshot-unregister-completed", 0, atomic_load_explicit(&retained.ready, memory_order_acquire));
     }
 }
 
@@ -771,9 +800,7 @@ run_retained(struct options options, retained_prepare_fn prepare, retained_run_f
     {
         current_round = round;
         current_role = "parent-prepare";
-        current_stage = options.retained == RETAINED_TIMER ? "retained-timer" :
-            options.retained == RETAINED_QUEUE ? "retained-queue" :
-            options.retained == RETAINED_WAITS ? "retained-waits" : "retained-wait-retirement";
+        current_stage = retained_stage_names[options.retained];
         reset_retained(options.retained);
         emit("begin", 0, options.retained);
         int result = prepare(options.retained, round, retained_control, report);
@@ -1026,6 +1053,14 @@ main(int argc, char **argv)
         else if (strcmp(argv[argument], "--retained-wait-retirement") == 0 && options.retained == RETAINED_NONE)
         {
             options.retained = RETAINED_WAIT_RETIREMENT;
+        }
+        else if (strcmp(argv[argument], "--retained-queued-waits") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_QUEUED_WAITS;
+        }
+        else if (strcmp(argv[argument], "--retained-finalizer-wait") == 0 && options.retained == RETAINED_NONE)
+        {
+            options.retained = RETAINED_FINALIZER_WAIT;
         }
         else if (strcmp(argv[argument], "--descendants") == 0 && options.descendants == 0)
         {

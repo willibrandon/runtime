@@ -19,6 +19,8 @@ cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -pthread -o host
 ./host "$PWD/publish/NativeForkProbe.so" --retained-queue --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-waits --enable-fork
 ./host "$PWD/publish/NativeForkProbe.so" --retained-wait-retirement --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-queued-waits --enable-fork
+./host "$PWD/publish/NativeForkProbe.so" --retained-finalizer-wait --enable-fork
 ```
 
 The timer must be unfired at the native checkpoint and fire once in each process.
@@ -33,6 +35,12 @@ unregisters an existing wait and registers/unregisters another. Both operations 
 finish while thread activation is closed. Callback counts, completion notifications
 and independent parent/child state are checked exactly. The thread-exit observation
 uses `/proc/self/task` and requires Linux.
+
+The queued-wait case keeps seventy original callbacks pending at the native
+checkpoint, with their unregister notifications still unsignaled. Each callback
+and notification must complete in both processes without resignal or reregistration.
+The finalizer case performs blocking unregister from an actual finalizer after the
+wait threads exit. These two cases also use the Linux thread-exit observation.
 
 The same host checks successive generations:
 
