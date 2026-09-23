@@ -111,11 +111,18 @@ struct DotNetRuntimeDebugHeader
     GlobalValueEntry (* volatile GlobalEntries)[GlobalEntriesArraySize] = nullptr;
 };
 
-extern "C" struct DotNetRuntimeDebugHeader DotNetRuntimeDebugHeader;
-
-#ifdef HOST_UNIX
+extern "C"
+{
+#if defined(__ELF__)
+// Keep the debugger export discoverable while binding runtime writes to this
+// image. Native hosts can load multiple Native AOT libraries with RTLD_GLOBAL.
+__attribute__ ((visibility ("protected")))
+#elif defined(HOST_UNIX)
 __attribute__ ((visibility ("default")))
 #endif
+extern struct DotNetRuntimeDebugHeader DotNetRuntimeDebugHeader;
+}
+
 struct DotNetRuntimeDebugHeader DotNetRuntimeDebugHeader = {};
 
 #define MAKE_DEBUG_ENTRY(TypeName, FieldName, Value)                             \
