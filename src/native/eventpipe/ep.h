@@ -211,6 +211,11 @@ ep_start_streaming (EventPipeSessionID session_id);
 bool
 ep_enabled (void);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+bool ep_prepare_for_fork (void);
+bool ep_resume_after_fork (void);
+#endif
+
 EventPipeProvider *
 ep_create_provider (
 	const ep_char8_t *provider_name,

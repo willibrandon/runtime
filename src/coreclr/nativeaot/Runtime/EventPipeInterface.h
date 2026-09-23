@@ -21,5 +21,9 @@ void EventPipe_ThreadShutdown();
 void EventPipe_Shutdown();
 bool DiagnosticServer_Shutdown();
 
+// Retire and recreate diagnostics workers while preserving parent sessions.
+bool EventPipe_PrepareForFork();
+bool EventPipe_ResumeParentAfterFork();
+
 void EventTracing_Initialize();
 #endif //EVENTPIPE_INTERFACE_H

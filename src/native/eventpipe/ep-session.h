@@ -75,6 +75,10 @@ struct _EventPipeSession_Internal {
 	IpcStream *stream;
 	// Successful enable transfers the stream and user_events descriptor to this session.
 	bool owns_ipc_resources;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	// The fork checkpoint stopped this session's writer without disabling the session.
+	bool fork_streaming_paused;
+#endif
 };
 
 #if !defined(EP_INLINE_GETTER_SETTER) && !defined(EP_IMPL_SESSION_GETTER_SETTER)
@@ -231,6 +235,12 @@ ep_session_type_uses_buffer_manager (EventPipeSessionType session_type);
 
 bool
 ep_session_type_uses_streaming_thread (EventPipeSessionType session_type);
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// Called with the EventPipe lock held. The session and buffered events remain live.
+void ep_session_pause_streaming_for_fork (EventPipeSession *session);
+void ep_session_resume_streaming_after_fork (EventPipeSession *session);
+#endif
 
 #endif /* ENABLE_PERFTRACING */
 #endif /* __EVENTPIPE_SESSION_H__ */

@@ -1,4 +1,5 @@
 #include "ep-rt-config.h"
+#include "ds-rt-config.h"
 
 #ifdef ENABLE_PERFTRACING
 #if !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES)
@@ -1320,6 +1321,46 @@ ep_enabled (void)
 	return (ep_volatile_load_eventpipe_state () >= EP_STATE_INITIALIZED &&
 			ep_volatile_load_number_of_sessions () > 0);
 }
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+bool
+ep_prepare_for_fork (void)
+{
+	ep_requires_lock_not_held ();
+	if (!ep_rt_config_acquire ())
+		return false;
+
+	ep_sample_profiler_pause_for_fork ();
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session != NULL)
+			ep_session_pause_streaming_for_fork (session);
+	}
+
+	ep_rt_config_release ();
+	ep_requires_lock_not_held ();
+	return true;
+}
+
+bool
+ep_resume_after_fork (void)
+{
+	ep_requires_lock_not_held ();
+	if (!ep_rt_config_acquire ())
+		return false;
+
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session != NULL)
+			ep_session_resume_streaming_after_fork (session);
+	}
+
+	ep_sample_profiler_resume_after_fork ();
+	ep_rt_config_release ();
+	ep_requires_lock_not_held ();
+	return true;
+}
+#endif
 
 EventPipeProvider *
 ep_create_provider (

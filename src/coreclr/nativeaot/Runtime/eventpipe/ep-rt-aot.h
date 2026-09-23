@@ -778,6 +778,9 @@ EP_RT_DEFINE_THREAD_FUNC (ep_rt_thread_aot_start_session_or_sampling_thread)
     extern ep_rt_thread_handle_t ep_rt_aot_setup_thread (void);
     thread_params->thread = ep_rt_aot_setup_thread ();
 
+    extern void ep_rt_aot_set_server_name (void);
+    ep_rt_aot_set_server_name ();
+
     size_t result = thread_params->thread_func (thread_params);
     delete thread_params;
     return result;

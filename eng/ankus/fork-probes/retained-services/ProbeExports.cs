@@ -106,6 +106,28 @@ public static unsafe class ProbeExports
         };
 
     /// <summary>
+    /// Keeps a managed stack active for a bounded sampling observation.
+    /// </summary>
+    /// <param name="milliseconds">The maximum requested work interval.</param>
+    /// <returns>Zero when the interval is valid; otherwise one.</returns>
+    [UnmanagedCallersOnly(EntryPoint = "fork_probe_managed_work", CallConvs = [typeof(CallConvCdecl)])]
+    public static int ManagedWork(int milliseconds)
+    {
+        if (milliseconds is < 1 or > 1_000)
+        {
+            return 1;
+        }
+
+        long deadline = Environment.TickCount64 + milliseconds;
+        do
+        {
+            Thread.SpinWait(1_000);
+        } while (Environment.TickCount64 < deadline);
+
+        return 0;
+    }
+
+    /// <summary>
     /// Checks inherited mutations and changes them only in the current process across successive generations.
     /// </summary>
     /// <param name="nativePid">The current native process identifier.</param>

@@ -44,6 +44,8 @@ static bool descriptor_closes_on_exec(int descriptor)
 }
 
 extern bool DiagnosticServer_Shutdown();
+extern bool EventPipe_PrepareForFork();
+extern bool EventPipe_ResumeParentAfterFork();
 extern void ds_ipc_stream_factory_close_ports(ds_ipc_error_callback_func callback);
 extern bool ds_server_pause_listener();
 extern bool ds_server_resume_listener();
@@ -63,6 +65,11 @@ extern "C" __attribute__((visibility("default"))) uint32_t ankus_probe_listener_
     }
 
     return ds_server_resume_listener() ? 0 : UINT32_MAX;
+}
+
+extern "C" __attribute__((visibility("default"))) int ankus_probe_eventpipe_checkpoint(bool pause)
+{
+    return (pause ? EventPipe_PrepareForFork() : EventPipe_ResumeParentAfterFork()) ? 1 : 0;
 }
 
 extern "C" __attribute__((visibility("default"))) bool ankus_probe_diagnostics_shutdown(bool shutdown)

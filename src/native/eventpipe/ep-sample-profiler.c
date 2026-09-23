@@ -1,4 +1,5 @@
 #include "ep-rt-config.h"
+#include "ds-rt-config.h"
 
 #ifdef ENABLE_PERFTRACING
 #if !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES)
@@ -20,6 +21,9 @@ static uint64_t _sampling_rate_in_ns = NUM_NANOSECONDS_IN_1_MS; // 1ms
 static bool _time_period_is_set = false;
 static volatile uint32_t _can_start_sampling = (uint32_t)false;
 static int32_t _ref_count = 0;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+static bool _fork_sampling_paused = false;
+#endif
 
 #ifdef HOST_WIN32
 #include <mmsystem.h>
@@ -316,6 +320,52 @@ ep_sample_profiler_disable (void)
 	--_ref_count;
 	EP_ASSERT (_ref_count >= 0);
 }
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void
+ep_sample_profiler_pause_for_fork (void)
+{
+	ep_requires_lock_held ();
+
+	if (!sample_profiler_load_profiling_enabled ())
+		return;
+
+	EP_ASSERT (_ref_count > 0 && !_fork_sampling_paused);
+	sample_profiler_store_profiling_enabled (false);
+	ep_rt_sample_profiler_disabled ();
+	ep_rt_wait_event_wait (&_thread_shutdown_event, EP_INFINITE_WAIT, false);
+	ep_rt_wait_event_free (&_thread_shutdown_event);
+	if (_time_period_is_set)
+		sample_profiler_reset_time_granularity ();
+
+	_fork_sampling_paused = true;
+}
+
+void
+ep_sample_profiler_resume_after_fork (void)
+{
+	ep_requires_lock_held ();
+
+	if (!_fork_sampling_paused)
+		return;
+
+	EP_ASSERT (_ref_count > 0 && !sample_profiler_load_profiling_enabled ());
+	sample_profiler_store_profiling_enabled (true);
+	ep_rt_sample_profiler_enabled (_thread_time_event);
+	ep_rt_wait_event_alloc (&_thread_shutdown_event, true, false);
+	if (!ep_rt_wait_event_is_valid (&_thread_shutdown_event))
+		EP_UNREACHABLE ("Unable to recreate sample profiler event after fork checkpoint.");
+
+#ifndef PERFTRACING_DISABLE_THREADS
+	ep_rt_thread_id_t thread_id = ep_rt_uint64_t_to_thread_id_t (0);
+	if (!ep_rt_thread_create ((void *)sampling_thread, NULL, EP_THREAD_TYPE_SAMPLING, &thread_id))
+		EP_UNREACHABLE ("Unable to recreate sample profiler thread after fork checkpoint.");
+#endif
+
+	sample_profiler_set_time_granularity ();
+	_fork_sampling_paused = false;
+}
+#endif
 
 void
 ep_sample_profiler_can_start_sampling (void)

@@ -1,4 +1,5 @@
 #include "ep-rt-config.h"
+#include "ds-rt-config.h"
 
 #ifdef ENABLE_PERFTRACING
 #if !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES)
@@ -651,6 +652,37 @@ ep_session_disable (EventPipeSession *session)
 
 	ep_session_provider_list_clear (session->providers);
 }
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void
+ep_session_pause_streaming_for_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	ep_requires_lock_held ();
+
+	if (!ep_session_type_uses_streaming_thread (session->session_type) ||
+		!ep_session_get_streaming_enabled (session))
+		return;
+
+	EP_ASSERT (!session->fork_streaming_paused);
+	session->fork_streaming_paused = true;
+	session_disable_streaming_thread (session);
+}
+
+void
+ep_session_resume_streaming_after_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	ep_requires_lock_held ();
+
+	if (!session->fork_streaming_paused)
+		return;
+
+	EP_ASSERT (!ep_session_get_streaming_enabled (session));
+	session->fork_streaming_paused = false;
+	session_create_streaming_thread (session);
+}
+#endif
 
 bool
 ep_session_write_all_buffers_to_file (EventPipeSession *session, bool *events_written)

@@ -21,6 +21,8 @@ typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
 typedef int (*connect_fn)(const char*, uint32_t);
 typedef uint32_t (*listener_fn)(bool);
 typedef uint64_t (*pending_response_fn)(void);
+typedef int (*eventpipe_checkpoint_fn)(bool);
+typedef int32_t (*managed_work_fn)(int32_t);
 typedef int (*trace_ownership_fn)(int, int, uint64_t*);
 typedef int (*block_sends_fn)(int);
 static volatile sig_atomic_t interrupt_count;
@@ -77,6 +79,8 @@ main(int argc, char **argv)
     connect_fn connect_client = (connect_fn) dlsym(library, "ankus_probe_connect");
     listener_fn listener_checkpoint = (listener_fn) dlsym(library, "ankus_probe_listener_checkpoint");
     pending_response_fn pending_response = (pending_response_fn) dlsym(library, "ankus_probe_pending_response");
+    eventpipe_checkpoint_fn eventpipe_checkpoint = (eventpipe_checkpoint_fn) dlsym(library, "ankus_probe_eventpipe_checkpoint");
+    managed_work_fn managed_work = (managed_work_fn) dlsym(library, "fork_probe_managed_work");
     if (initialize == NULL || shutdown_server == NULL || listen_failure == NULL || enable == NULL || initialize(getpid(), report) != 0)
     {
         return 71;
@@ -127,6 +131,26 @@ main(int argc, char **argv)
         else if (command[0] == 'e')
         {
             printf("enable %d\n", enable());
+        }
+        else if (command[0] == 'f')
+        {
+            int pause;
+            if (eventpipe_checkpoint == NULL || sscanf(command + 1, "%d", &pause) != 1)
+            {
+                return 76;
+            }
+
+            printf("fork-checkpoint %d\n", eventpipe_checkpoint(pause != 0));
+        }
+        else if (command[0] == 'g')
+        {
+            int milliseconds;
+            if (managed_work == NULL || sscanf(command + 1, "%d", &milliseconds) != 1)
+            {
+                return 76;
+            }
+
+            printf("managed-work %d\n", managed_work(milliseconds));
         }
         else if (command[0] == 's')
         {

@@ -87,5 +87,5 @@ fork without managed child calls; listener tests stop and restart without forkin
 Command and tracing responses now preserve queued output. Linux UserEvents
 descriptor receipt can also stop and resume with the listener. A tracing session
 starts only after its complete success response is delivered. Active tracing and
-sampling threads still need fork quiescence, child recovery and support for
-multiple runtime instances.
+sampling threads now stop and restart without ending their sessions. Blocked trace
+output, child recovery and multiple runtime instances still need coverage.

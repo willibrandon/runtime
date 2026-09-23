@@ -19,6 +19,10 @@
     <LinkerArg Include="-Wl,--undefined=ankus_probe_pending_response" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_listener_checkpoint" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_listener_checkpoint" />
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_eventpipe_checkpoint" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_eventpipe_checkpoint" />
+    <IlcArg Include="--export-dynamic-symbol:fork_probe_managed_work" />
+    <LinkerArg Include="-Wl,--undefined=fork_probe_managed_work" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_connect" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_connect" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_stream_io" />

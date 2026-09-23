@@ -22,8 +22,8 @@ from run import HEADER, MAGIC, process_info, receive
 CASES = [f"collect-{version}-malformed" for version in range(1, 6)] + [
     "stop-empty", "stop-short", "stop-long", "stop-unknown", "descriptor-eof",
     "descriptor-extra", "descriptor-invalid", "descriptor-pause", "start-response-pause",
-    "session-lifetime", "session-capacity", "allocation-file", "allocation-serializer",
-    "allocation-session"]
+    "active-writer-pause", "active-sampling-pause", "session-lifetime", "session-capacity",
+    "allocation-file", "allocation-serializer", "allocation-session"]
 BAD_ENCODING = 0x80131384
 FAIL = 0x80004005
 
@@ -33,10 +33,11 @@ def request(peer, command_id, body):
     peer.sendall(HEADER.pack(MAGIC, HEADER.size + len(body), 2, command_id, 0) + body)
 
 
-def collect_body(user_events=False):
+def collect_body(user_events=False, sampling=False):
     """Encode CollectTracing5 without sampling, rundown, or stack walking."""
-    provider = struct.pack("<QI", 0, 5) + encoded_string("Ankus-Ownership-Probe")
-    provider += struct.pack("<IBI", 0, 1, 0)  # No arguments or event-ID filter.
+    provider_name = "Microsoft-DotNETCore-SampleProfiler" if sampling else "Ankus-Ownership-Probe"
+    provider = struct.pack("<QI", 0, 5) + encoded_string(provider_name)
+    provider += struct.pack("<IBI", 0, 0, 0)  # No arguments; exclude no event IDs.
     if user_events:
         provider += encoded_string("ankus_ownership_probe") + struct.pack("<I", 0)
         return struct.pack("<IQI", 1, 0, 1) + provider
@@ -130,6 +131,66 @@ def set_send_blocked(process, blocked):
     """Control the fixture's link-time send boundary without changing runtime code."""
     expected = 1 if blocked else 0
     assert command(process, f"w {expected}") == f"send-blocked {expected}"
+
+
+def process_threads(process):
+    """Return every live task and its kernel-visible name."""
+    tasks = {}
+    for path in Path(f"/proc/{process.pid}/task").glob("*/comm"):
+        try:
+            tasks[int(path.parent.name)] = path.read_text().strip()
+        except FileNotFoundError:
+            pass
+    return tasks
+
+
+def wait_process_threads(process, expected):
+    """Wait for the exact process task count and retain their identities."""
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        threads = process_threads(process)
+        if len(threads) == expected:
+            return threads
+        time.sleep(0.002)
+    raise AssertionError(f"expected {expected} process threads: {process_threads(process)}")
+
+
+def run_active_worker_pause(process, endpoint, evidence, sampling):
+    """Stop and recreate a live trace writer and optional sampler without ending its session."""
+    baseline = process_threads(process)
+    with connect(endpoint) as peer:
+        request(peer, 6, collect_body(sampling=sampling))
+        session_id = session_reply(peer)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as readers:
+            reader = readers.submit(drain_trace, peer)
+            expected = len(baseline) + (2 if sampling else 1)
+            before = wait_process_threads(process, expected)
+            if sampling:
+                assert command(process, "g 50") == "managed-work 0"
+
+            cycles = []
+            for index in range(20):
+                assert command(process, "f 1") == "fork-checkpoint 1"
+                paused = wait_process_threads(process, len(baseline) - 1)
+                assert command(process, "f 0") == "fork-checkpoint 1"
+                after = wait_process_threads(process, expected)
+                cycles.append({"index": index, "paused": paused, "resumed": after})
+                if sampling:
+                    assert command(process, "g 10") == "managed-work 0"
+
+            stop(endpoint, session_id)
+            bytes_received = reader.result(timeout=4)
+            if sampling:
+                assert bytes_received > 738, "sampling thread produced no trace events"
+
+            evidence["requests"].append({
+                "session": session_id,
+                "sampling": sampling,
+                "threads_baseline": baseline,
+                "threads_before": before,
+                "cycles": cycles,
+                "bytes": bytes_received,
+            })
 
 
 def run_descriptor_pause(process, endpoint, evidence):
@@ -288,6 +349,10 @@ def run_case(args, case):
                     run_descriptor_pause(process, endpoint, evidence)
                 elif case == "start-response-pause":
                     run_start_response_pause(process, endpoint, evidence)
+                elif case == "active-writer-pause":
+                    run_active_worker_pause(process, endpoint, evidence, False)
+                elif case == "active-sampling-pause":
+                    run_active_worker_pause(process, endpoint, evidence, True)
                 elif case.startswith("session-"):
                     count = 64 if case == "session-capacity" else 1
                     rounds = 1 if count == 64 else 20

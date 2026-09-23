@@ -37,5 +37,10 @@ ep_sample_profiler_set_sampling_rate (uint64_t nanoseconds);
 uint64_t
 ep_sample_profiler_get_sampling_rate (void);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void ep_sample_profiler_pause_for_fork (void);
+void ep_sample_profiler_resume_after_fork (void);
+#endif
+
 #endif /* ENABLE_PERFTRACING */
 #endif /* __EVENTPIPE_SAMPLE_PROFILER_H__ */
