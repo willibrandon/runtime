@@ -1360,6 +1360,58 @@ ep_resume_after_fork (void)
 	ep_requires_lock_not_held ();
 	return true;
 }
+
+bool
+ep_reset_child_after_fork (void)
+{
+	ep_requires_lock_not_held ();
+
+	EventPipeProviderCallbackDataQueue callback_data_queue;
+	EventPipeProviderCallbackData provider_callback_data;
+	EventPipeProviderCallbackDataQueue *provider_callback_data_queue =
+		ep_provider_callback_data_queue_init (&callback_data_queue);
+	if (provider_callback_data_queue == NULL)
+		return false;
+
+	if (!ep_rt_config_acquire ()) {
+		ep_provider_callback_data_queue_fini (provider_callback_data_queue);
+		return false;
+	}
+
+	uint32_t abandoned_sampling_sessions = 0;
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session == NULL || session->session_type == EP_SESSION_TYPE_LISTENER ||
+			session->session_type == EP_SESSION_TYPE_SYNCHRONOUS)
+			continue;
+
+		if (session_requested_sampling (session))
+			abandoned_sampling_sessions++;
+
+		config_enable_disable (ep_config_get (), session, provider_callback_data_queue, false);
+		ep_volatile_store_allow_write (ep_volatile_load_allow_write () & ~(ep_session_get_mask (session)));
+		ep_volatile_store_session (index, NULL);
+		ep_session_suspend_write_event (session);
+		ep_volatile_store_number_of_sessions (ep_volatile_load_number_of_sessions () - 1);
+		ep_session_abandon_for_fork (session);
+		ep_session_dec_ref (session);
+	}
+
+	if (abandoned_sampling_sessions != 0)
+		ep_sample_profiler_abandon_sessions_after_fork (abandoned_sampling_sessions);
+
+	ep_rt_config_release ();
+
+	while (ep_provider_callback_data_queue_try_dequeue (provider_callback_data_queue, &provider_callback_data)) {
+		ep_rt_prepare_provider_invoke_callback (&provider_callback_data);
+		provider_invoke_callback (&provider_callback_data);
+		ep_provider_callback_data_fini (&provider_callback_data);
+	}
+
+	ep_provider_callback_data_queue_fini (provider_callback_data_queue);
+	ep_requires_lock_not_held ();
+	return true;
+}
 #endif
 
 EventPipeProvider *

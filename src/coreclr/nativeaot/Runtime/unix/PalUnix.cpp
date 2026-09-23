@@ -864,7 +864,6 @@ bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pC
 
 bool PalStartEventPipeHelperThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
-    RhForkRecordBackgroundWorker();
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
 }
 

@@ -1923,6 +1923,9 @@ ipc_stream_flush_func (void *object)
 #ifdef DS_NATIVEAOT_FORK_LISTENER
 	EP_ASSERT (object != NULL);
 	DiagnosticsIpcStream *ipc_stream = (DiagnosticsIpcStream *)object;
+	if (ipc_stream->fork_abandoned)
+		return true;
+
 	if (ipc_stream->fork_output_file == NULL)
 		return true;
 
@@ -1943,6 +1946,19 @@ ipc_stream_close_func (void *object)
 }
 
 static
+void
+ipc_stream_abandon_fork_func (void *object)
+{
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	EP_ASSERT (object != NULL);
+	DiagnosticsIpcStream *ipc_stream = (DiagnosticsIpcStream *)object;
+	ipc_stream->fork_abandoned = true;
+#else
+	(void)object;
+#endif
+}
+
+static
 IpcPollEvents
 ipc_stream_poll_func (
 	void *object,
@@ -1959,7 +1975,8 @@ static IpcStreamVtable ipc_stream_vtable = {
 	ipc_stream_write_func,
 	ipc_stream_flush_func,
 	ipc_stream_close_func,
-	ipc_stream_poll_func };
+	ipc_stream_poll_func,
+	ipc_stream_abandon_fork_func };
 
 static
 DiagnosticsIpcStream *
@@ -1981,6 +1998,7 @@ ipc_stream_alloc (
 	instance->fork_output_length = 0;
 	instance->fork_output_sent = 0;
 	instance->fork_interrupt_fd = -1;
+	instance->fork_abandoned = false;
 #endif
 	// Readiness alone does not bound a blocking send or the next partial read.
 	if (ipc_socket_set_blocking (client_socket, false) == DS_IPC_SOCKET_ERROR) {
@@ -2229,7 +2247,12 @@ ds_ipc_stream_close (
 	EP_ASSERT (ipc_stream != NULL);
 
 	if (ipc_stream->client_socket != DS_IPC_INVALID_SOCKET) {
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		if (!ipc_stream->fork_abandoned)
+			ds_ipc_stream_flush (ipc_stream);
+#else
 		ds_ipc_stream_flush (ipc_stream);
+#endif
 
 		int result_close = ipc_socket_close (ipc_stream->client_socket);
 		if (result_close == DS_IPC_SOCKET_ERROR) {

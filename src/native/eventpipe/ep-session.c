@@ -690,6 +690,18 @@ ep_session_resume_streaming_after_fork (EventPipeSession *session)
 	session->fork_streaming_paused = false;
 	session_create_streaming_thread (session);
 }
+
+void
+ep_session_abandon_for_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	EP_ASSERT (!ep_session_get_streaming_enabled (session));
+	ep_requires_lock_held ();
+
+	ep_file_abandon_for_fork (session->file);
+	if (session->owns_ipc_resources && session->stream != NULL)
+		ep_ipc_stream_abandon_for_fork_vcall (session->stream);
+}
 #endif
 
 bool

@@ -16,3 +16,5 @@ void EventPipe_Shutdown() {}
 bool DiagnosticServer_Shutdown() { return false; }
 bool EventPipe_PrepareForFork() { return true; }
 bool EventPipe_ResumeParentAfterFork() { return true; }
+bool EventPipe_ResetChildAfterFork() { return true; }
+bool EventPipe_ResumeChildAfterFork() { return true; }

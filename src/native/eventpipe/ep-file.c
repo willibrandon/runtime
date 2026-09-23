@@ -385,7 +385,7 @@ ep_file_free (EventPipeFile *file)
 {
 	ep_return_void_if_nok (file != NULL);
 
-	if (file->event_block != NULL && file->fast_serializer != NULL)
+	if (!file->fork_abandoned && file->event_block != NULL && file->fast_serializer != NULL)
 		file_write_end (file);
 
 	ep_event_block_free (file->event_block);
@@ -401,6 +401,13 @@ ep_file_free (EventPipeFile *file)
 
 	ep_fast_serializable_object_fini (&file->fast_serializable_object);
 	ep_rt_object_free (file);
+}
+
+void
+ep_file_abandon_for_fork (EventPipeFile *file)
+{
+	if (file != NULL)
+		file->fork_abandoned = true;
 }
 
 bool

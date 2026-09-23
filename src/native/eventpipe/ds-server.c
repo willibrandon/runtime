@@ -27,7 +27,23 @@ static DiagnosticsIpcStream *_server_response_stream;
 static EventPipeCollectTracingCommandPayload *_server_eventpipe_payload;
 static EventPipeSessionID _server_response_session_id;
 static DiagnosticsIpcMessage _server_pending_message;
+static bool _server_pending_message_active;
 static uint32_t _server_received;
+
+static void server_pending_message_init (void)
+{
+	EP_ASSERT (!_server_pending_message_active);
+	ds_ipc_message_init (&_server_pending_message);
+	_server_pending_message_active = true;
+}
+
+static void server_pending_message_fini (void)
+{
+	EP_ASSERT (_server_pending_message_active);
+	ds_ipc_message_fini (&_server_pending_message);
+	ds_ipc_message_init (&_server_pending_message);
+	_server_pending_message_active = false;
+}
 
 static void server_begin_response (DiagnosticsIpcStream *stream)
 {
@@ -176,7 +192,7 @@ static size_t server_loop_tick (void* data) {
 
 		_server_pending_stream = NULL;
 		_server_received = 0;
-		ds_ipc_message_fini (&_server_pending_message);
+		server_pending_message_fini ();
 		if (pending_session_id != 0)
 			_server_response_session_id = pending_session_id;
 
@@ -211,7 +227,7 @@ static size_t server_loop_tick (void* data) {
 
 		ds_ipc_stream_set_fork_interrupt (stream, _server_interrupt [0]);
 		ds_rt_auto_trace_signal ();
-		ds_ipc_message_init (message);
+		server_pending_message_init ();
 		_server_pending_stream = stream;
 		_server_received = 0;
 	}
@@ -226,7 +242,7 @@ static size_t server_loop_tick (void* data) {
 		server_begin_response (stream);
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
 		ds_ipc_stream_free (stream);
-		ds_ipc_message_fini (message);
+		server_pending_message_fini ();
 		return 0;
 	}
 #else
@@ -266,7 +282,11 @@ static size_t server_loop_tick (void* data) {
 
 		ds_ipc_message_send_error (stream, DS_IPC_E_UNKNOWN_MAGIC);
 		ds_ipc_stream_free (stream);
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		server_pending_message_fini ();
+#else
 		ds_ipc_message_fini (message);
+#endif
 		return 0; // continue
 	}
 
@@ -309,7 +329,11 @@ static size_t server_loop_tick (void* data) {
 		break;
 	}
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	server_pending_message_fini ();
+#else
 	ds_ipc_message_fini (message);
+#endif
 
 	(void)data; // unused
 	return 0; // continue
@@ -396,6 +420,51 @@ bool ds_server_resume_listener (void)
 
 	_server_paused = false;
 	return true;
+}
+
+bool ds_server_reset_child_after_fork (void)
+{
+	EP_ASSERT (_server_paused || _server_interrupt [0] < 0);
+
+	DiagnosticsIpcStream *pending_stream = _server_pending_stream;
+	DiagnosticsIpcStream *response_stream = _server_response_stream;
+	if (response_stream != NULL)
+		ds_ipc_stream_end_response (response_stream, _server_response_session_id == 0);
+
+	if (pending_stream != NULL && pending_stream != response_stream)
+		ds_ipc_stream_free (pending_stream);
+
+	_server_pending_stream = NULL;
+	_server_response_stream = NULL;
+	_server_response_session_id = 0;
+	_server_received = 0;
+	ds_eventpipe_collect_tracing_command_payload_free (_server_eventpipe_payload);
+	_server_eventpipe_payload = NULL;
+	if (_server_pending_message_active)
+		server_pending_message_fini ();
+	else
+		ds_ipc_message_init (&_server_pending_message);
+
+	ds_ipc_stream_factory_set_interrupt (-1);
+	if (_server_interrupt [0] >= 0) {
+		close (_server_interrupt [0]);
+		close (_server_interrupt [1]);
+		_server_interrupt [0] = _server_interrupt [1] = -1;
+	}
+
+	ds_ipc_stream_factory_reset_after_fork ();
+	ds_ipc_pal_shutdown ();
+	ep_rt_wait_event_free (&_server_resume_runtime_startup_event);
+	server_volatile_store_shutting_down_state (false);
+	ep_rt_volatile_store_uint32_t (&_server_pausing, 0);
+	_server_paused = false;
+	_is_paused_for_startup = false;
+	return true;
+}
+
+bool ds_server_resume_child_after_fork (void)
+{
+	return ds_server_init ();
 }
 #endif
 

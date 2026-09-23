@@ -79,6 +79,7 @@ struct _DiagnosticsIpcStream_Internal {
 	uint64_t fork_output_length;
 	uint64_t fork_output_sent;
 	int fork_interrupt_fd;
+	bool fork_abandoned;
 #endif
 };
 

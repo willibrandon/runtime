@@ -279,6 +279,31 @@ ds_ipc_stream_factory_fini (void)
 	ep_ipc_stream_factory_callback_set (NULL);
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void
+ds_ipc_stream_factory_reset_after_fork (void)
+{
+	ds_ipc_stream_factory_set_interrupt (-1);
+	if (_ds_port_array != NULL) {
+		DN_VECTOR_PTR_FOREACH_BEGIN (DiagnosticsPort *, port, _ds_port_array) {
+			ds_port_close (port, false, NULL);
+			ds_ipc_stream_free (port->stream);
+			port->stream = NULL;
+			ds_ipc_free (port->ipc);
+			port->ipc = NULL;
+			ds_port_free_vcall (port);
+		} DN_VECTOR_PTR_FOREACH_END;
+
+		dn_vector_ptr_free (_ds_port_array);
+		_ds_port_array = NULL;
+	}
+
+	_ds_current_port = NULL;
+	store_shutting_down_state (false);
+	ep_ipc_stream_factory_callback_set (NULL);
+}
+#endif
+
 bool
 ds_ipc_stream_factory_configure (ds_ipc_error_callback_func callback)
 {

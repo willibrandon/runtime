@@ -44,3 +44,21 @@ bool EventPipe_ResumeParentAfterFork()
     return false;
 #endif
 }
+
+bool EventPipe_ResetChildAfterFork()
+{
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+    return ds_server_reset_child_after_fork() && ep_reset_child_after_fork();
+#else
+    return false;
+#endif
+}
+
+bool EventPipe_ResumeChildAfterFork()
+{
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+    return ep_resume_after_fork() && ds_server_resume_child_after_fork();
+#else
+    return false;
+#endif
+}

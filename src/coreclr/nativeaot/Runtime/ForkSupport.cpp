@@ -59,7 +59,6 @@ namespace
     ForkServiceCallback s_resumeParentServices;
     ForkServiceCallback s_resetChildServices;
     ForkServiceCallback s_resumeChildServices;
-    bool s_diagnosticsImplementationDisabledAtStartup;
     Thread* s_owner;
     Thread* s_inheritedFinalizer;
     // Runtime images recover independently. Another image can start pthreads and
@@ -75,8 +74,7 @@ namespace
 
     bool HasSupportedConfiguration()
     {
-        return s_diagnosticsImplementationDisabledAtStartup && !s_backgroundWorkerStarted.load() &&
-            RhIsOwnedGCForFork(GCHeapUtilities::GetGCHeap());
+        return !s_backgroundWorkerStarted.load() && RhIsOwnedGCForFork(GCHeapUtilities::GetGCHeap());
     }
 
     void InvokeServiceCallback(ForkServiceCallback callback, const char* failure)
@@ -122,6 +120,11 @@ namespace
         // thread-exit callbacks must run before native ThreadStore removal can finish.
         InvokeServiceCallback(s_prepareServices,
             "NativeAOT fork prototype: managed service preparation failed.\n");
+
+        if (!EventPipe_PrepareForFork())
+        {
+            ForkFailure("NativeAOT fork prototype: diagnostics preparation failed.\n");
+        }
 
         if (!RhPrepareGCForFork(GCHeapUtilities::GetGCHeap(), 30000))
         {
@@ -209,6 +212,11 @@ namespace
             ForkFailure("NativeAOT fork prototype: parent GC resume failed.\n");
         }
 
+        if (!EventPipe_ResumeParentAfterFork())
+        {
+            ForkFailure("NativeAOT fork prototype: parent diagnostics resume failed.\n");
+        }
+
         InvokeServiceCallback(s_resumeParentServices,
             "NativeAOT fork prototype: managed parent service resume failed.\n");
         s_state.store(ForkState::Idle);
@@ -247,6 +255,11 @@ namespace
         InvokeServiceCallback(s_resetChildServices,
             "NativeAOT fork prototype: managed child service reset failed.\n");
 
+        if (!EventPipe_ResetChildAfterFork())
+        {
+            ForkFailure("NativeAOT fork prototype: child diagnostics reset failed.\n");
+        }
+
         if (!RhRestartFinalizationAfterFork())
         {
             ForkFailure("NativeAOT fork prototype: failed to restart child finalization.\n");
@@ -262,6 +275,11 @@ namespace
         if (!RhResumeGCForFork())
         {
             ForkFailure("NativeAOT fork prototype: child GC resume failed.\n");
+        }
+
+        if (!EventPipe_ResumeChildAfterFork())
+        {
+            ForkFailure("NativeAOT fork prototype: child diagnostics resume failed.\n");
         }
 
         InvokeServiceCallback(s_resumeChildServices,
@@ -547,13 +565,6 @@ bool RhForkIsAdmissionClosed()
         (state == ForkState::ChildRepair && ThreadStore::RawGetCurrentThread() != s_owner);
 }
 
-void RhForkCaptureStartupConfiguration()
-{
-    // NativeAOT normally links the disabled diagnostics implementation. Environment
-    // variables do not establish whether provider state and helpers were initialized.
-    s_diagnosticsImplementationDisabledAtStartup = !EventPipe_IsSupported();
-}
-
 void RhForkRecordBackgroundWorker()
 {
     s_backgroundWorkerStarted.store(true);
@@ -602,10 +613,6 @@ void RhForkThreadShutdownCompleted()
 bool RhForkIsAdmissionClosed()
 {
     return false;
-}
-
-void RhForkCaptureStartupConfiguration()
-{
 }
 
 void RhForkRecordBackgroundWorker()

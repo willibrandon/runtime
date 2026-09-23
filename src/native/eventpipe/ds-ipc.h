@@ -28,6 +28,10 @@ ds_ipc_stream_factory_init (void);
 void
 ds_ipc_stream_factory_fini (void);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void ds_ipc_stream_factory_reset_after_fork (void);
+#endif
+
 bool
 ds_ipc_stream_factory_configure (ds_ipc_error_callback_func callback);
 

@@ -29,6 +29,8 @@ ds_server_shutdown (void);
 // tracing-session handoff must finish before pause returns.
 bool ds_server_pause_listener (void);
 bool ds_server_resume_listener (void);
+bool ds_server_reset_child_after_fork (void);
+bool ds_server_resume_child_after_fork (void);
 // Only read after a successful pause, when the listener no longer writes it.
 uint32_t ds_server_paused_input_bytes (void);
 uint64_t ds_server_paused_output_bytes (void);

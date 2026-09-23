@@ -365,6 +365,22 @@ ep_sample_profiler_resume_after_fork (void)
 	sample_profiler_set_time_granularity ();
 	_fork_sampling_paused = false;
 }
+
+void
+ep_sample_profiler_abandon_sessions_after_fork (uint32_t count)
+{
+	ep_requires_lock_held ();
+	EP_ASSERT (count <= (uint32_t)_ref_count);
+
+	_ref_count -= (int32_t)count;
+	if (_ref_count == 0) {
+		if (_time_period_is_set)
+			sample_profiler_reset_time_granularity ();
+
+		sample_profiler_unload_dependencies ();
+		_fork_sampling_paused = false;
+	}
+}
 #endif
 
 void

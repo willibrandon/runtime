@@ -550,6 +550,18 @@ ep_ipc_stream_poll_vcall (IpcStream *ipc_stream, uint32_t timeout_ms)
 	return vtable->poll_func (ipc_stream, timeout_ms);
 }
 
+void
+ep_ipc_stream_abandon_for_fork_vcall (IpcStream *ipc_stream)
+{
+	ep_return_void_if_nok (ipc_stream != NULL);
+
+	EP_ASSERT (ipc_stream->vtable != NULL);
+	IpcStreamVtable *vtable = ipc_stream->vtable;
+
+	EP_ASSERT (vtable->abandon_fork_func != NULL);
+	vtable->abandon_fork_func (ipc_stream);
+}
+
 /*
  * IpcStreamWriter.
  */

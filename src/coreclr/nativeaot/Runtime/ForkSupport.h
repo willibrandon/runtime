@@ -11,7 +11,6 @@ class IGCHeap;
 using ForkServiceCallback = int32_t (*)();
 
 // Experimental Unix fork checkpoint. No production hosting contract is implied.
-void RhForkCaptureStartupConfiguration();
 void RhForkRecordBackgroundWorker();
 void RhForkBeforeManagedEntry();
 bool RhForkIsAdmissionClosed();

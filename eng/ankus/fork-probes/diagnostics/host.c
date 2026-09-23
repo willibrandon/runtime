@@ -29,6 +29,105 @@ typedef uint64_t (*blocked_send_attempts_fn)(void);
 typedef int64_t (*limit_sends_fn)(int64_t);
 typedef uint64_t (*constrained_send_bytes_fn)(void);
 static volatile sig_atomic_t interrupt_count;
+static pid_t managed_child = -1;
+static int managed_child_command = -1;
+static int managed_child_response = -1;
+
+struct child_result
+{
+    int32_t pid;
+    int32_t result;
+};
+
+static bool
+write_all(int descriptor, const void *buffer, size_t length)
+{
+    const uint8_t *cursor = buffer;
+    while (length != 0)
+    {
+        ssize_t count = write(descriptor, cursor, length);
+        if (count < 0 && errno == EINTR)
+        {
+            continue;
+        }
+
+        if (count <= 0)
+        {
+            return false;
+        }
+
+        cursor += count;
+        length -= (size_t) count;
+    }
+
+    return true;
+}
+
+static bool
+read_all(int descriptor, void *buffer, size_t length)
+{
+    uint8_t *cursor = buffer;
+    while (length != 0)
+    {
+        ssize_t count = read(descriptor, cursor, length);
+        if (count < 0 && errno == EINTR)
+        {
+            continue;
+        }
+
+        if (count <= 0)
+        {
+            return false;
+        }
+
+        cursor += count;
+        length -= (size_t) count;
+    }
+
+    return true;
+}
+
+static void
+managed_child_loop(int command_descriptor, int response_descriptor,
+                   managed_work_fn managed_work, shutdown_fn shutdown_server,
+                   block_sends_fn block_sends)
+{
+    struct child_result result = {(int32_t) getpid(), managed_work(25)};
+    if (block_sends != NULL)
+    {
+        block_sends(0);
+    }
+
+    if (!write_all(response_descriptor, &result, sizeof(result)))
+    {
+        _exit(80);
+    }
+
+    char command;
+    while (read_all(command_descriptor, &command, sizeof(command)))
+    {
+        if (command == 'g')
+        {
+            result.result = managed_work(50);
+            if (!write_all(response_descriptor, &result, sizeof(result)))
+            {
+                _exit(81);
+            }
+        }
+        else if (command == 'q')
+        {
+            result.result = shutdown_server(true) ? 0 : 1;
+            write_all(response_descriptor, &result, sizeof(result));
+            _exit(result.result);
+        }
+        else
+        {
+            _exit(82);
+        }
+    }
+
+    _exit(83);
+}
 
 /* Interrupt blocking system calls without terminating the probe. */
 static void
@@ -140,6 +239,86 @@ main(int argc, char **argv)
         {
             printf("enable %d\n", enable());
         }
+        else if (command[0] == 'z')
+        {
+            int commands[2];
+            int responses[2];
+            if (managed_child != -1 || managed_work == NULL ||
+                pipe(commands) != 0 || pipe(responses) != 0)
+            {
+                return 78;
+            }
+
+            pid_t child = fork();
+            if (child < 0)
+            {
+                return 72;
+            }
+
+            if (child == 0)
+            {
+                close(commands[1]);
+                close(responses[0]);
+                managed_child_loop(commands[0], responses[1], managed_work, shutdown_server, block_sends);
+            }
+
+            close(commands[0]);
+            close(responses[1]);
+            struct child_result result;
+            if (!read_all(responses[0], &result, sizeof(result)))
+            {
+                return 79;
+            }
+
+            managed_child = child;
+            managed_child_command = commands[1];
+            managed_child_response = responses[0];
+            printf("fork-child %d %d\n", result.pid, result.result);
+        }
+        else if (command[0] == 'h')
+        {
+            struct child_result result;
+            char work = 'g';
+            if (managed_child == -1 || !write_all(managed_child_command, &work, sizeof(work)) ||
+                !read_all(managed_child_response, &result, sizeof(result)))
+            {
+                int status = 0;
+                pid_t waited = managed_child == -1 ? -1 : waitpid(managed_child, &status, 0);
+                fprintf(stderr, "child-response-failed pid=%d waited=%d status=%d signal=%d exit=%d\n",
+                        (int) managed_child, (int) waited, status,
+                        waited > 0 && WIFSIGNALED(status) ? WTERMSIG(status) : 0,
+                        waited > 0 && WIFEXITED(status) ? WEXITSTATUS(status) : -1);
+                return 79;
+            }
+
+            printf("child-work %d %d\n", result.pid, result.result);
+        }
+        else if (command[0] == 'j')
+        {
+            struct child_result result;
+            char stop = 'q';
+            if (managed_child == -1 || !write_all(managed_child_command, &stop, sizeof(stop)) ||
+                !read_all(managed_child_response, &result, sizeof(result)))
+            {
+                return 79;
+            }
+
+            int status;
+            pid_t waited;
+            do
+            {
+                waited = waitpid(managed_child, &status, 0);
+            } while (waited < 0 && errno == EINTR);
+
+            pid_t child = managed_child;
+            close(managed_child_command);
+            close(managed_child_response);
+            managed_child = -1;
+            managed_child_command = -1;
+            managed_child_response = -1;
+            int exit_code = waited == child && WIFEXITED(status) ? WEXITSTATUS(status) : -1;
+            printf("child-stopped %d %d %d\n", result.pid, result.result, exit_code);
+        }
         else if (command[0] == 'f')
         {
             int pause;
@@ -166,6 +345,15 @@ main(int argc, char **argv)
         }
         else if (command[0] == 'q')
         {
+            if (managed_child != -1)
+            {
+                char stop = 'q';
+                struct child_result result;
+                write_all(managed_child_command, &stop, sizeof(stop));
+                read_all(managed_child_response, &result, sizeof(result));
+                waitpid(managed_child, NULL, 0);
+            }
+
             return 0;
         }
         else if (command[0] == 'p' || command[0] == 'r')

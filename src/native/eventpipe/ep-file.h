@@ -48,6 +48,7 @@ struct _EventPipeFile_Internal {
 	uint32_t stack_id_counter;
 	volatile uint32_t metadata_id_counter;
 	volatile uint32_t initialized;
+	bool fork_abandoned;
 	// The format to serialize.
 	EventPipeSerializationFormat format;
 };
@@ -77,6 +78,8 @@ ep_file_alloc (
 
 void
 ep_file_free (EventPipeFile *file);
+
+void ep_file_abandon_for_fork (EventPipeFile *file);
 
 bool
 ep_file_initialize_file (EventPipeFile *file);

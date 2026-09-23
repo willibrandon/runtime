@@ -129,9 +129,8 @@ def main():
                     assert evidence["listen_failure"] == "listen-failure 0"
                     assert not failure_endpoint.exists()
                     assert process_info(endpoint, process.pid) == before
-                # Full diagnostic fork support is still guarded until all session/thread work is implemented.
                 evidence["fork_capability"] = command(process, "e")
-                assert evidence["fork_capability"] == "enable -3"
+                assert evidence["fork_capability"] == "enable 1"
                 assert command(process, "s") == "shutdown 1"
                 assert not endpoint.exists(), "the creating process failed to unlink its own endpoint"
                 evidence["owner_cleanup"] = True

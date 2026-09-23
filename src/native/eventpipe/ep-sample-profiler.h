@@ -40,6 +40,7 @@ ep_sample_profiler_get_sampling_rate (void);
 #ifdef DS_NATIVEAOT_FORK_LISTENER
 void ep_sample_profiler_pause_for_fork (void);
 void ep_sample_profiler_resume_after_fork (void);
+void ep_sample_profiler_abandon_sessions_after_fork (uint32_t count);
 #endif
 
 #endif /* ENABLE_PERFTRACING */

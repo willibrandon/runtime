@@ -242,6 +242,7 @@ ep_session_type_uses_streaming_thread (EventPipeSessionType session_type);
 // Called with the EventPipe lock held. The session and buffered events remain live.
 void ep_session_pause_streaming_for_fork (EventPipeSession *session);
 void ep_session_resume_streaming_after_fork (EventPipeSession *session);
+void ep_session_abandon_for_fork (EventPipeSession *session);
 #endif
 
 #endif /* ENABLE_PERFTRACING */

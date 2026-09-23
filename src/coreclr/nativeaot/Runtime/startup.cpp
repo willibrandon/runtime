@@ -87,11 +87,8 @@ RhConfig* g_pRhConfig = &g_sRhConfig;
 void InitializeGCEventLock();
 bool InitializeGC();
 
-void RhForkCaptureStartupConfiguration();
-
 static bool InitDLL(HANDLE hPalInstance)
 {
-    RhForkCaptureStartupConfiguration();
 #ifdef FEATURE_CACHED_INTERFACE_DISPATCH
     //
     // Initialize interface dispatch.
