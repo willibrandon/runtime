@@ -5636,7 +5636,8 @@ public:
     /***************************************************************************************************/
     // public methods                                                                                  //
     /***************************************************************************************************/
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
     static bool prepare_for_fork(uint32_t timeoutMilliseconds);
 #endif
 

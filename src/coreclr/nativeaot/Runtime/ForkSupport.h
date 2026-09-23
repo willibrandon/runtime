@@ -10,7 +10,7 @@ class IGCHeap;
 // Each managed service callback catches exceptions and returns zero on success.
 using ForkServiceCallback = int32_t (*)();
 
-// Experimental Linux x64 fork checkpoint. No production hosting contract is implied.
+// Experimental Unix fork checkpoint. No production hosting contract is implied.
 void RhForkCaptureStartupConfiguration();
 void RhForkRecordBackgroundWorker();
 void RhForkBeforeManagedEntry();

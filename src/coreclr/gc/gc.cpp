@@ -28,7 +28,8 @@
 #include "gcenv.inl"
 #include "gceventstatus.h"
 
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 #include <atomic>
 #endif
 
@@ -59,7 +60,8 @@ namespace WKS {
 #include "gcimpl.h"
 #include "gcpriv.h"
 
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
 // The fork gate is independent of application GC configuration and temporary
 // concurrent-GC disable requests from other runtime subsystems.
 static std::atomic<bool> s_forkGCAdmissionClosed(false);
@@ -68,7 +70,7 @@ static std::atomic<bool> s_forkGCReady(false);
 static std::atomic<uint64_t> s_forkGCActiveObservations(0);
 static IGCHeap* s_forkOwnedGCHeap;
 
-static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr), "Fork observations require a lock-free Linux x64 counter.");
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr), "Fork observations require a lock-free 64-bit counter.");
 
 // A passive observation of actual active collection state while gc_lock is held.
 // Reading or recording it never changes collection selection or worker progress.
@@ -24649,7 +24651,8 @@ void gc_heap::garbage_collect (int n)
             (should_do_blocking_collection == FALSE) &&
             gc_can_use_concurrent &&
             !temp_disable_concurrent_p &&
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
             !s_forkGCAdmissionClosed.load() &&
 #endif
             ((settings.pause_mode == pause_interactive) || (settings.pause_mode == pause_sustained_low_latency)))
@@ -40302,7 +40305,8 @@ void gc_heap::kill_gc_thread()
     bgc_thread = 0;
 }
 
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
 bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
 {
     bool expected = false;
@@ -40419,7 +40423,8 @@ void gc_heap::bgc_thread_function()
         // can't wait for GC complete here - RestartEE will be called
         // when we've done the init work.
 
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
         if (s_forkGCExitRequested.load())
         {
             // The request is published only after the last BGC completed and new
@@ -49468,7 +49473,8 @@ HRESULT GCHeap::Init(size_t hn)
 //System wide initialization
 HRESULT GCHeap::Initialize()
 {
-#if defined(FEATURE_NATIVEAOT) && defined(TARGET_LINUX) && defined(TARGET_AMD64) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(SERVER_GC) && !defined(BUILD_AS_STANDALONE)
     // An externally loaded collector cannot borrow this built-in heap's fork API.
     s_forkOwnedGCHeap = this;
 #endif
