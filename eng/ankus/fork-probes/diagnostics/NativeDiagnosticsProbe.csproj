@@ -1,0 +1,27 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>NativeDiagnosticsProbe</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <UseNativeLibPrefix>false</UseNativeLibPrefix>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EventSourceSupport>true</EventSourceSupport>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <NativeLibrary Include="$(MSBuildProjectDirectory)/obj/diagnostics-bridge.o" />
+    <Compile Include="../retained-services/ProbeExports.cs" Link="ProbeExports.cs" />
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_listen_failure" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_listen_failure" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_diagnostics_shutdown" />
+    <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_diagnostics_shutdown" />
+  </ItemGroup>
+</Project>

@@ -39,6 +39,10 @@ struct _DiagnosticsIpc_Internal {
 	ds_ipc_socket_len_t server_address_len;
 	ds_ipc_socket_family_t server_address_family;
 	ds_ipc_socket_t server_socket;
+#ifdef DS_IPC_PAL_UDS
+	// A forked process owns its descriptor copy, but not the creating process's path.
+	uint32_t creator_process_id;
+#endif
 	bool is_listening;
 	bool is_closed;
 	bool is_dual_mode;

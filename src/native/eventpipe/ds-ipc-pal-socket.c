@@ -791,6 +791,9 @@ ipc_init_listener (
 	}
 
 	ipc->server_socket = server_socket;
+#ifdef DS_IPC_PAL_AF_UNIX
+	ipc->creator_process_id = (uint32_t)getpid ();
+#endif
 	success = true;
 
 ep_on_exit:
@@ -1198,25 +1201,8 @@ ds_ipc_listen (
 		if (callback)
 			callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
 
-#ifdef DS_IPC_PAL_AF_UNIX
-		int result_unlink;
-		DS_ENTER_BLOCKING_PAL_SECTION;
-		result_unlink = unlink (((struct sockaddr_un *)ipc->server_address)->sun_path);
-		DS_EXIT_BLOCKING_PAL_SECTION;
-
-		EP_ASSERT (result_unlink != -1);
-		if (result_unlink == -1) {
-			if (callback)
-				callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
-		}
-#endif
-
-		int result_close;
-		result_close = ipc_socket_close (ipc->server_socket);
-		if (result_close == DS_IPC_SOCKET_ERROR) {
-			if (callback)
-				callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
-		}
+		// Use the common close path so subsequent free cannot close a reused descriptor.
+		ds_ipc_close (ipc, false, callback);
 
 		ep_raise_error ();
 	}
@@ -1336,20 +1322,23 @@ ds_ipc_close (
 		}
 
 #ifdef DS_IPC_PAL_AF_UNIX
-		// N.B. - it is safe to unlink the unix domain socket file while the server
-		// is still alive:
-		// "The usual UNIX close-behind semantics apply; the socket can be unlinked
-		// at any time and will be finally removed from the file system when the last
-		// reference to it is closed." - unix(7) man page
-		int result_unlink;
-		DS_ENTER_BLOCKING_PAL_SECTION;
-		result_unlink = unlink (((struct sockaddr_un *)ipc->server_address)->sun_path);
-		DS_EXIT_BLOCKING_PAL_SECTION;
+		// Closing an inherited descriptor must not remove the live parent's endpoint.
+		if (ipc->creator_process_id == (uint32_t)getpid ()) {
+			// N.B. - it is safe to unlink the unix domain socket file while the server
+			// is still alive:
+			// "The usual UNIX close-behind semantics apply; the socket can be unlinked
+			// at any time and will be finally removed from the file system when the last
+			// reference to it is closed." - unix(7) man page
+			int result_unlink;
+			DS_ENTER_BLOCKING_PAL_SECTION;
+			result_unlink = unlink (((struct sockaddr_un *)ipc->server_address)->sun_path);
+			DS_EXIT_BLOCKING_PAL_SECTION;
 
-		if (result_unlink == -1) {
-			if (callback)
-				callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
-			EP_ASSERT (!"Failed to unlink server address.");
+			if (result_unlink == -1) {
+				if (callback)
+					callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
+				EP_ASSERT (!"Failed to unlink server address.");
+			}
 		}
 #endif
 	}
