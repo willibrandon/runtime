@@ -141,6 +141,7 @@ public static unsafe partial class ProbeExports
                 9 => CheckActiveCollection(nativePid, parentPid, tokenLow, tokenHigh, report),
                 10 => CheckActiveHeap(report),
                 11 => CheckActiveCollection(nativePid, parentPid, tokenLow, tokenHigh, report, requireBackground: false),
+                12 => AdoptForkParent(nativePid, parentPid, tokenLow, tokenHigh, report),
                 _ => 99,
             };
         }
@@ -149,6 +150,30 @@ public static unsafe partial class ProbeExports
             report(900, error.HResult);
             return 90;
         }
+    }
+
+    /// <summary>
+    /// Verifies the first child inherited the postmaster state, then makes that recovered child the next fork parent.
+    /// </summary>
+    /// <param name="nativePid">The recovered child's native process identifier.</param>
+    /// <param name="parentPid">The original postmaster process identifier.</param>
+    /// <param name="tokenLow">The inherited token's first word.</param>
+    /// <param name="tokenHigh">The inherited token's second word.</param>
+    /// <param name="report">Reports the adopted backend process identifier.</param>
+    /// <returns>Zero only when the complete inherited graph and current process identity are valid.</returns>
+    private static int AdoptForkParent(int nativePid, int parentPid, long tokenLow, long tokenHigh,
+        delegate* unmanaged[Cdecl]<int, long, void> report)
+    {
+        int inherited = CheckGraph(nativePid, parentPid, tokenLow, tokenHigh, report, mutateChild: false);
+        if (inherited != 0 || Environment.ProcessId != nativePid)
+        {
+            return inherited != 0 ? inherited : 21;
+        }
+
+        s_parentPid = nativePid;
+        s_managedPidSnapshot = nativePid;
+        report(22, nativePid);
+        return 0;
     }
 
     /// <summary>

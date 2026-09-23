@@ -33,6 +33,7 @@ public:
     void                    LockThreadStore();
     void                    UnlockThreadStore();
     bool                    HasOnlyForkThreads(Thread* caller, Thread* finalizer, bool allowBackgroundGC = false);
+    bool                    HasOnlyForkCaller(Thread* caller);
     void                    RemoveFinalizerAfterFork(Thread* finalizer);
     bool                    RefreshCallerAfterFork(Thread* caller);
 

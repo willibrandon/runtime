@@ -14,7 +14,7 @@ using ForkServiceCallback = int32_t (*)();
 void RhForkRecordBackgroundWorker();
 void RhForkBeforeManagedEntry();
 bool RhForkIsAdmissionClosed();
-void RhForkFinalizerCheckpoint();
+bool RhForkFinalizerCheckpoint();
 void RhForkRegisterFinalizer(Thread* thread);
 void RhForkThreadShutdownStarted();
 void RhForkThreadShutdownCompleted();

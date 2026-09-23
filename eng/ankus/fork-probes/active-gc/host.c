@@ -42,7 +42,8 @@ static const char *current_stage = "startup";
 static int current_round = 0;
 static const char *stage_names[] = {
     "invalid", "graph", "pid", "gc-finalizer", "thread-pool", "timer", "exception",
-    "active-heap-initialize", "active-request", "active-completed", "active-heap-recheck", "blocking-or-completed-request"
+    "active-heap-initialize", "active-request", "active-completed", "active-heap-recheck", "blocking-or-completed-request",
+    "adopt-fork-parent"
 };
 
 /* Appends trusted fixed labels into the bounded JSON record. */
@@ -298,6 +299,29 @@ run_worker(struct options options)
         {
             return 3;
         }
+
+        current_stage = "backend-fork";
+        pid_t backend = fork();
+        if (backend < 0)
+        {
+            emit("fork-error", 0, errno);
+            return 70;
+        }
+
+        if (backend != 0)
+        {
+            int result = wait_bounded(backend, 180, false);
+            emit("backend-status", 0, result);
+            return result;
+        }
+
+        current_role = "backend";
+        if (invoke(run, 12, parent, token_low, token_high, "backend-adopt") != 0)
+        {
+            return 2;
+        }
+
+        parent = getpid();
     }
 
     observation_fn observations = (observation_fn) dlsym(library, "RhGetForkGCActiveObservationCount");

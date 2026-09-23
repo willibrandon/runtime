@@ -22,9 +22,14 @@ namespace System.Runtime
         {
             while (true)
             {
-                // Wait until there's some work to be done. If true is returned we should finalize objects,
-                // otherwise memory is low and we should initiate a collection.
-                if (InternalCalls.RhpWaitForFinalizerRequest() != 0)
+                // Wait until there is work, low memory, or a fork-host retirement request.
+                uint request = InternalCalls.RhpWaitForFinalizerRequest();
+                if (request == 2)
+                {
+                    return;
+                }
+
+                if (request != 0)
                 {
                     int observedFullGcCount = RuntimeImports.RhGetGcCollectionCount(RuntimeImports.RhGetMaxGcGeneration(), false);
                     uint finalizerCount = DrainQueue();
@@ -37,7 +42,7 @@ namespace System.Runtime
                 }
                 else
                 {
-                    // RhpWaitForFinalizerRequest() returned false and indicated that memory is low. We help
+                    // RhpWaitForFinalizerRequest() returned zero and indicated that memory is low. We help
                     // out by initiating a garbage collection and then go back to waiting for another request.
                     InternalCalls.RhCollect(0, InternalGCCollectionMode.Blocking, lowMemoryP: true);
                 }

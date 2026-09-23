@@ -5,6 +5,11 @@ and call `fork` from native code after managed calls return. Parent and child
 must preserve object identity, values and pending work. Native deadlines turn
 hangs into failed runs.
 
+Enabling fork support leaves the original native host dormant with one thread.
+The retained-service host calls `RhEnterForkHost` and `RhExitForkHost` around later
+managed callbacks. The active-GC host performs its stress forks from the first
+recovered child, where the runtime can remain active between managed calls.
+
 Build the runtime's Release nativeaot component and CoreLib first. Set
 `ANKUS_AOT_SDK` to the absolute `artifacts/bin/coreclr/linux.x64.Release/aotsdk`
 directory produced by those builds. The probes pin the matching .NET SDK and

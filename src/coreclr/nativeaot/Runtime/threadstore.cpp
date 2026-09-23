@@ -126,6 +126,30 @@ bool ThreadStore::HasOnlyForkThreads(Thread* caller, Thread* finalizer, bool all
     return callerFound && finalizerFound && (count == 2 || (allowBackgroundGC && count == 3));
 }
 
+// The caller owns m_Lock. A dormant fork host must contain no other managed thread.
+bool ThreadStore::HasOnlyForkCaller(Thread* caller)
+{
+    if (caller == nullptr)
+    {
+        return false;
+    }
+
+    uint32_t count = 0;
+    bool callerFound = false;
+    FOREACH_THREAD(thread)
+    {
+        if (thread != caller)
+        {
+            return false;
+        }
+
+        callerFound = true;
+        count++;
+    }
+    END_FOREACH_THREAD
+    return callerFound && count == 1;
+}
+
 // Only the calling OS thread exists after fork; admission is still closed.
 // Do not run normal thread-exit callbacks on behalf of the vanished finalizer.
 void ThreadStore::RemoveFinalizerAfterFork(Thread* finalizer)

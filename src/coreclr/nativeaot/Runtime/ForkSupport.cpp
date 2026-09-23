@@ -20,9 +20,13 @@
 #include <atomic>
 #include <pthread.h>
 #include <unistd.h>
+#ifdef TARGET_OSX
+#include <mach/mach.h>
+extern "C" int __is_threaded;
+#endif
 
 void RhEnableFinalization();
-bool RhRestartFinalizationAfterFork();
+bool RhRestartFinalization();
 
 namespace
 {
@@ -32,8 +36,10 @@ namespace
         Registering,
         Enabling,
         Idle,
+        Dormant,
         PreparingManaged,
         Preparing,
+        ForkingDormant,
         ParentResuming,
         ChildPending,
         ChildRepair,
@@ -50,6 +56,7 @@ namespace
     std::atomic<uint32_t> s_threadShutdowns(0);
     std::atomic<bool> s_backgroundWorkerStarted(false);
     std::atomic<bool> s_servicesRegistered(false);
+    std::atomic<bool> s_finalizerExit(false);
     // Close admission atomically with the last callback's exit, preserving queued work.
     constexpr uint32_t WorkPreparing = 1u << 31;
     constexpr uint32_t WorkRetired = 1u << 30;
@@ -60,7 +67,10 @@ namespace
     ForkServiceCallback s_resetChildServices;
     ForkServiceCallback s_resumeChildServices;
     Thread* s_owner;
+    pid_t s_hostProcess;
+    uint32_t s_hostManagedDepth;
     Thread* s_inheritedFinalizer;
+    bool s_hasInheritedFinalizer;
     // Runtime images recover independently. Another image can start pthreads and
     // reuse the vanished finalizer's TLS before this image's first managed entry.
     gc_alloc_context s_inheritedFinalizerAllocContext;
@@ -92,6 +102,34 @@ namespace
     }
 
     void CompleteChildRecovery();
+    void PrepareDormant();
+
+    bool ResetHostThreadState()
+    {
+#ifdef TARGET_OSX
+        thread_act_array_t threads = nullptr;
+        mach_msg_type_number_t count = 0;
+        kern_return_t result = task_threads(mach_task_self(), &threads, &count);
+        if (result != KERN_SUCCESS)
+        {
+            return false;
+        }
+
+        for (mach_msg_type_number_t index = 0; index < count; index++)
+        {
+            mach_port_deallocate(mach_task_self(), threads[index]);
+        }
+
+        vm_deallocate(mach_task_self(), reinterpret_cast<vm_address_t>(threads), count * sizeof(thread_t));
+        if (count != 1)
+        {
+            return false;
+        }
+
+        __is_threaded = 0;
+#endif
+        return true;
+    }
 
     void PrepareFork()
     {
@@ -99,6 +137,12 @@ namespace
         if (caller != s_owner || !caller->IsAtNativeTopOfStackForFork())
         {
             ForkFailure("NativeAOT fork support: fork requires the enabled native caller outside managed frames.\n");
+        }
+
+        ForkState expected = ForkState::Dormant;
+        if (s_state.compare_exchange_strong(expected, ForkState::ForkingDormant))
+        {
+            return;
         }
 
         // A native child may fork again before its first managed entry. Complete
@@ -110,7 +154,7 @@ namespace
             CompleteChildRecovery();
         }
 
-        ForkState expected = ForkState::Idle;
+        expected = ForkState::Idle;
         if (!s_state.compare_exchange_strong(expected, ForkState::PreparingManaged))
         {
             ForkFailure("NativeAOT fork support: overlapping or incomplete fork checkpoint.\n");
@@ -187,6 +231,7 @@ namespace
             // The finalizer is parked and its allocation context cannot change.
             // Preserve the entire EE/GC contract in ordinary image-owned storage.
             s_inheritedFinalizerAllocContext = *finalizer->GetAllocContext();
+            s_hasInheritedFinalizer = true;
         }
 
         store->UnlockThreadStore();
@@ -202,8 +247,15 @@ namespace
 
     void ParentAfterFork()
     {
+        if (s_state.load() == ForkState::ForkingDormant)
+        {
+            s_state.store(ForkState::Dormant);
+            return;
+        }
+
         s_inheritedFinalizer = nullptr;
         s_inheritedFinalizerAllocContext.init();
+        s_hasInheritedFinalizer = false;
         // Admission reopens before the callback can perform Thread.Start handshakes.
         // The distinct state still rejects a recursive fork during service restart.
         s_state.store(ForkState::ParentResuming);
@@ -225,8 +277,12 @@ namespace
     void ChildAfterFork()
     {
         // No allocation, managed execution, event mutation, or thread creation here.
-        // The map has free slots after removing the two inherited entries.
-        GetThreadStore()->RemoveFinalizerAfterFork(s_inheritedFinalizer);
+        // A running child loses its finalizer; a dormant host retired it before fork.
+        if (s_state.load() != ForkState::ForkingDormant)
+        {
+            GetThreadStore()->RemoveFinalizerAfterFork(s_inheritedFinalizer);
+        }
+
         s_inheritedFinalizer = nullptr;
         if (!GetThreadStore()->RefreshCallerAfterFork(s_owner))
         {
@@ -235,6 +291,7 @@ namespace
 
         s_finalizer.store(nullptr);
         s_acknowledged.store(0);
+        s_finalizerExit.store(false);
         s_state.store(ForkState::ChildPending);
     }
 
@@ -248,7 +305,12 @@ namespace
         s_state.store(ForkState::ChildRepair);
         // Never dereference the vanished pthread's TLS during lazy recovery.
         // The durable snapshot supplies the allocation tail and unused-byte count.
-        Thread::ReleaseAllocationContextForFork(&s_inheritedFinalizerAllocContext);
+        if (s_hasInheritedFinalizer)
+        {
+            Thread::ReleaseAllocationContextForFork(&s_inheritedFinalizerAllocContext);
+            s_inheritedFinalizerAllocContext.init();
+            s_hasInheritedFinalizer = false;
+        }
 
         // Repair shared managed service state before inherited finalizable objects
         // can observe it. This callback must not start or join framework workers.
@@ -260,7 +322,7 @@ namespace
             ForkFailure("NativeAOT fork support: child diagnostics reset failed.\n");
         }
 
-        if (!RhRestartFinalizationAfterFork())
+        if (!RhRestartFinalization())
         {
             ForkFailure("NativeAOT fork support: failed to restart child finalization.\n");
         }
@@ -285,6 +347,132 @@ namespace
         InvokeServiceCallback(s_resumeChildServices,
             "NativeAOT fork support: managed child service resume failed.\n");
         s_state.store(ForkState::Idle);
+    }
+
+    void ResumeDormantHost()
+    {
+        s_finalizerExit.store(false);
+        s_acknowledged.store(0);
+        s_state.store(ForkState::ParentResuming);
+        if (!RhRestartFinalization())
+        {
+            ForkFailure("NativeAOT fork support: failed to restart host finalization.\n");
+        }
+
+        RhEnableFinalization();
+        if (!RhResumeGCForFork())
+        {
+            ForkFailure("NativeAOT fork support: host GC resume failed.\n");
+        }
+
+        if (!EventPipe_ResumeParentAfterFork())
+        {
+            ForkFailure("NativeAOT fork support: host diagnostics resume failed.\n");
+        }
+
+        InvokeServiceCallback(s_resumeParentServices,
+            "NativeAOT fork support: managed host service resume failed.\n");
+        s_state.store(ForkState::Idle);
+    }
+
+    void PrepareDormant()
+    {
+        Thread* caller = ThreadStore::RawGetCurrentThread();
+        if (caller != s_owner || !caller->IsAtNativeTopOfStackForFork())
+        {
+            ForkFailure("NativeAOT fork support: host retirement requires its native owner.\n");
+        }
+
+        ForkState expected = ForkState::Idle;
+        if (!s_state.compare_exchange_strong(expected, ForkState::PreparingManaged))
+        {
+            ForkFailure("NativeAOT fork support: host retirement overlapped another checkpoint.\n");
+        }
+
+        InvokeServiceCallback(s_prepareServices,
+            "NativeAOT fork support: managed host service preparation failed.\n");
+        if (!EventPipe_PrepareForFork())
+        {
+            ForkFailure("NativeAOT fork support: host diagnostics preparation failed.\n");
+        }
+
+        if (!RhPrepareGCForFork(GCHeapUtilities::GetGCHeap(), 30000))
+        {
+            ForkFailure("NativeAOT fork support: host GC did not retire its collectors.\n");
+        }
+
+        ThreadStore* store = GetThreadStore();
+        uint32_t attempts = 0;
+        while (true)
+        {
+            store->LockThreadStore();
+            bool drained = store->HasOnlyForkThreads(caller, s_finalizer.load()) &&
+                s_threadShutdowns.load() == 0;
+            if (drained)
+            {
+                s_state.store(ForkState::Preparing);
+            }
+
+            store->UnlockThreadStore();
+            if (drained)
+            {
+                break;
+            }
+
+            if (++attempts == 10000)
+            {
+                ForkFailure("NativeAOT fork support: host service threads did not detach.\n");
+            }
+
+            PalSleep(1);
+        }
+
+        uint32_t request = s_request.fetch_add(1) + 1;
+        if (request == 0)
+        {
+            ForkFailure("NativeAOT fork support: checkpoint sequence exhausted.\n");
+        }
+
+        s_finalizerExit.store(true);
+        RhEnableFinalization();
+        attempts = 0;
+        while (s_acknowledged.load() != request)
+        {
+            if (++attempts == 10000)
+            {
+                ForkFailure("NativeAOT fork support: host finalizer did not acknowledge retirement.\n");
+            }
+
+            PalSleep(1);
+        }
+
+        attempts = 0;
+        while (true)
+        {
+            store->LockThreadStore();
+            bool retired = s_finalizer.load() == nullptr && s_threadShutdowns.load() == 0 &&
+                store->HasOnlyForkCaller(caller);
+            store->UnlockThreadStore();
+            if (retired)
+            {
+                break;
+            }
+
+            if (++attempts == 10000)
+            {
+                ForkFailure("NativeAOT fork support: host finalizer did not detach.\n");
+            }
+
+            PalSleep(1);
+        }
+
+        if (!HasSupportedConfiguration() || !RhIsGCReadyForFork() ||
+            GCHeapUtilities::IsGCInProgress(TRUE) || !ResetHostThreadState())
+        {
+            ForkFailure("NativeAOT fork support: host did not return to one native thread.\n");
+        }
+
+        s_state.store(ForkState::Dormant);
     }
 }
 
@@ -419,7 +607,7 @@ extern "C" __attribute__((visibility("default"))) int32_t RhEnableForkSupport()
     ForkState expected = ForkState::Disabled;
     if (!s_state.compare_exchange_strong(expected, ForkState::Enabling))
     {
-        return expected == ForkState::Idle && caller == s_owner ? 1 : -2;
+        return (expected == ForkState::Idle || expected == ForkState::Dormant) && caller == s_owner ? 1 : -2;
     }
 
     if (!HasSupportedConfiguration())
@@ -455,42 +643,70 @@ extern "C" __attribute__((visibility("default"))) int32_t RhEnableForkSupport()
     }
 
     s_owner = caller;
+    s_hostProcess = getpid();
     s_state.store(ForkState::Idle);
+    PrepareDormant();
     return 1;
 }
 
-#ifdef TARGET_OSX
-// Native host validation uses the same checkpoint as pthread_atfork. It must
-// release a validation-only checkpoint before allowing another managed call.
-extern "C" uint32_t RhGetPreparedForkThread()
+extern "C" __attribute__((visibility("default"))) int32_t RhEnterForkHost()
 {
-    if (s_state.load() != ForkState::Preparing ||
-        ThreadStore::RawGetCurrentThread() != s_owner ||
-        s_acknowledged.load() != s_request.load())
+    ForkState state = s_state.load();
+    if (state == ForkState::Disabled || state == ForkState::Registering || state == ForkState::Enabling ||
+        getpid() != s_hostProcess)
     {
-        return 0;
+        return 1;
     }
 
-    Thread* finalizer = s_finalizer.load();
-    return finalizer == nullptr ? 0 : pthread_mach_thread_np(finalizer->GetOSThreadHandle());
-}
-
-extern "C" uint32_t RhBeginForkValidation()
-{
-    PrepareFork();
-    return RhGetPreparedForkThread();
-}
-
-extern "C" void RhEndForkValidation()
-{
-    if (RhGetPreparedForkThread() == 0)
+    if (ThreadStore::RawGetCurrentThread() != s_owner)
     {
-        ForkFailure("NativeAOT fork support: validation checkpoint was not prepared.\n");
+        return -1;
     }
 
-    ParentAfterFork();
+    if (s_hostManagedDepth != 0)
+    {
+        s_hostManagedDepth++;
+        return 1;
+    }
+
+    if (state != ForkState::Dormant || !s_owner->IsAtNativeTopOfStackForFork())
+    {
+        return -2;
+    }
+
+    ResumeDormantHost();
+    s_hostManagedDepth = 1;
+    return 1;
 }
-#endif
+
+extern "C" __attribute__((visibility("default"))) int32_t RhExitForkHost()
+{
+    ForkState state = s_state.load();
+    if (state == ForkState::Disabled || state == ForkState::Registering || state == ForkState::Enabling ||
+        getpid() != s_hostProcess)
+    {
+        return 1;
+    }
+
+    if (ThreadStore::RawGetCurrentThread() != s_owner || s_hostManagedDepth == 0)
+    {
+        return -1;
+    }
+
+    s_hostManagedDepth--;
+    if (s_hostManagedDepth != 0)
+    {
+        return 1;
+    }
+
+    if (state != ForkState::Idle || !s_owner->IsAtNativeTopOfStackForFork())
+    {
+        return -2;
+    }
+
+    PrepareDormant();
+    return 1;
+}
 
 void RhForkBeforeManagedEntry()
 {
@@ -528,13 +744,20 @@ void RhForkBeforeManagedEntry()
     }
 }
 
-void RhForkFinalizerCheckpoint()
+bool RhForkFinalizerCheckpoint()
 {
     while (s_state.load() == ForkState::Preparing)
     {
         s_acknowledged.store(s_request.load());
+        if (s_finalizerExit.load())
+        {
+            return false;
+        }
+
         PalSleep(1);
     }
+
+    return true;
 }
 
 void RhForkRegisterFinalizer(Thread* thread)
@@ -552,6 +775,11 @@ void RhForkThreadShutdownStarted()
 
 void RhForkThreadShutdownCompleted()
 {
+    if (s_finalizerExit.load() && ThreadStore::RawGetCurrentThread() == s_finalizer.load())
+    {
+        s_finalizer.store(nullptr);
+    }
+
     if (s_threadShutdowns.fetch_sub(1) == 0)
     {
         ForkFailure("NativeAOT fork support: thread shutdown accounting underflowed.\n");
@@ -561,7 +789,8 @@ void RhForkThreadShutdownCompleted()
 bool RhForkIsAdmissionClosed()
 {
     ForkState state = s_state.load();
-    return state == ForkState::Preparing || state == ForkState::ChildPending ||
+    return state == ForkState::Dormant || state == ForkState::Preparing ||
+        state == ForkState::ForkingDormant || state == ForkState::ChildPending ||
         (state == ForkState::ChildRepair && ThreadStore::RawGetCurrentThread() != s_owner);
 }
 
@@ -590,12 +819,23 @@ extern "C" int32_t RhEnableForkSupport()
     return -7;
 }
 
+extern "C" int32_t RhEnterForkHost()
+{
+    return 1;
+}
+
+extern "C" int32_t RhExitForkHost()
+{
+    return 1;
+}
+
 void RhForkBeforeManagedEntry()
 {
 }
 
-void RhForkFinalizerCheckpoint()
+bool RhForkFinalizerCheckpoint()
 {
+    return true;
 }
 
 void RhForkRegisterFinalizer(Thread*)

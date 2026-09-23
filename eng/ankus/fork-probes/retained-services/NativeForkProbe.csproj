@@ -22,6 +22,12 @@
     <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
     <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
     <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnterForkHost" />
+    <LinkerArg Include="-Wl,--undefined=RhEnterForkHost" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhEnterForkHost" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhExitForkHost" />
+    <LinkerArg Include="-Wl,--undefined=RhExitForkHost" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhExitForkHost" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
   </ItemGroup>
   <ItemGroup Condition="'$(ForkWorkProtocol)' == 'true'">
     <IlcArg Include="--export-dynamic-symbol:RhGetForkWorkState" />

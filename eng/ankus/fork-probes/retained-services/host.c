@@ -76,6 +76,8 @@ enum retained_command
 
 /* Optional observation exported only by the fork probe, never by extension consumers. */
 static enable_fn query_fork_work_state;
+static enable_fn enter_fork_host;
+static enable_fn exit_fork_host;
 
 /* Host settings never change managed runtime configuration or the process environment. */
 struct options
@@ -208,6 +210,44 @@ emit(const char *event, int32_t marker, int64_t value)
 
         written += (size_t) result;
     }
+}
+
+/* A PostgreSQL-style native host resumes managed workers only around managed calls. */
+static bool
+enter_managed_host(void)
+{
+    if (enter_fork_host == NULL)
+    {
+        return true;
+    }
+
+    int status = enter_fork_host();
+    if (status != 1)
+    {
+        emit("host-enter-error", 0, status);
+        return false;
+    }
+
+    return true;
+}
+
+/* Return the original native host to a one-thread state before it forks again. */
+static bool
+exit_managed_host(void)
+{
+    if (exit_fork_host == NULL)
+    {
+        return true;
+    }
+
+    int status = exit_fork_host();
+    if (status != 1)
+    {
+        emit("host-exit-error", 0, status);
+        return false;
+    }
+
+    return true;
 }
 
 #include "../collector-inventory.h"
@@ -697,9 +737,20 @@ invoke(run_fn run, int stage, pid_t parent, int64_t token_low, int64_t token_hig
     current_role = role;
     current_stage = stage_names[stage];
     emit("begin", 0, stage);
+    if (!enter_managed_host())
+    {
+        return 184;
+    }
+
     int result = run(stage, (int32_t) getpid(), (int32_t) parent, token_low, token_high, report);
     emit("result", 0, result);
-    if (!check_collector_inventory())
+    bool inventory_valid = check_collector_inventory();
+    if (!exit_managed_host())
+    {
+        return 185;
+    }
+
+    if (!inventory_valid)
     {
         return 183;
     }
@@ -715,9 +766,19 @@ check_lineage(lineage_fn lineage, pid_t parent, int64_t token_low, int64_t token
     current_role = role;
     current_stage = "lineage";
     emit("begin", expected, replacement);
+    if (!enter_managed_host())
+    {
+        return 184;
+    }
+
     int result = lineage((int32_t) getpid(), (int32_t) parent, token_low, token_high,
                          expected, replacement, report);
     emit("result", 0, result);
+    if (!exit_managed_host())
+    {
+        return 185;
+    }
+
     return result;
 }
 
@@ -858,15 +919,30 @@ run_retained(struct options options, retained_prepare_fn prepare, retained_run_f
         current_stage = retained_stage_names[options.retained];
         reset_retained(options.retained);
         emit("begin", 0, options.retained);
+        if (!enter_managed_host())
+        {
+            return 184;
+        }
+
         int result = prepare(options.retained, round, retained_control, report);
         emit("result", 0, result);
+        if (result == 0)
+        {
+            retained.armed = true;
+            release_retained_worker();
+        }
+
+        if (!exit_managed_host())
+        {
+            return 185;
+        }
+
         if (result != 0)
         {
             failures++;
             break;
         }
 
-        retained.armed = true;
         emit("before-native-fork", 0, options.retained);
         pid_t child = fork();
         retained.armed = false;
@@ -881,8 +957,18 @@ run_retained(struct options options, retained_prepare_fn prepare, retained_run_f
             current_role = "child";
             emit_retained_snapshot();
             emit("begin", 0, options.retained);
+            if (!enter_managed_host())
+            {
+                _exit(184);
+            }
+
             result = run(options.retained, round, (int32_t) getpid(), (int32_t) parent, report);
             emit("result", 0, result);
+            if (!exit_managed_host())
+            {
+                _exit(185);
+            }
+
             _exit(result == 0 ? 0 : 1);
         }
 
@@ -896,8 +982,18 @@ run_retained(struct options options, retained_prepare_fn prepare, retained_run_f
         }
 
         emit("begin", 0, options.retained);
+        if (!enter_managed_host())
+        {
+            return 184;
+        }
+
         result = run(options.retained, round, (int32_t) getpid(), (int32_t) parent, report);
         emit("result", 0, result);
+        if (!exit_managed_host())
+        {
+            return 185;
+        }
+
         if (result != 0)
         {
             failures++;
@@ -1000,7 +1096,9 @@ run_worker(struct options options)
         current_role = "parent";
         current_stage = "enable-fork";
         enable_fn enable = (enable_fn) dlsym(library, "RhEnableForkSupport");
-        if (enable == NULL)
+        enter_fork_host = (enable_fn) dlsym(library, "RhEnterForkHost");
+        exit_fork_host = (enable_fn) dlsym(library, "RhExitForkHost");
+        if (enable == NULL || enter_fork_host == NULL || exit_fork_host == NULL)
         {
             emit("missing-export", 0, 1);
             return 3;

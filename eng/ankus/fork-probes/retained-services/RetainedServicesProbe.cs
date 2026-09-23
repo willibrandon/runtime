@@ -423,6 +423,8 @@ public static unsafe class RetainedServicesProbe
             Thread.Sleep(1);
         }
 
+        report(124, Volatile.Read(ref barrier._completed));
+        report(125, Volatile.Read(ref batch._error));
         if (Volatile.Read(ref barrier._completed) != 1 || Volatile.Read(ref batch._error) != 0)
         {
             return 129;
