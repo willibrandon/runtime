@@ -26,6 +26,8 @@ cc -std=gnu17 -O2 -Wall -Wextra -Werror host.c -ldl -o host
 dotnet publish -c Release -r linux-x64 -o publish -p:IlcSdkPath="$ANKUS_AOT_SDK/"
 python3 run.py --host ./host --library publish/NativeDiagnosticsProbe.so --output results
 python3 io.py --host ./host --library publish/NativeDiagnosticsProbe.so --output io-results
+python3 connect.py --host ./host --library publish/NativeDiagnosticsProbe.so --output connect-results
+python3 reverse.py --host ./host --library publish/NativeDiagnosticsProbe.so --output reverse-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
@@ -42,6 +44,20 @@ supervisor kills only its own process group if the runtime stops responding.
 Use `--case partial-read` or another listed case to reproduce one failure against
 an earlier SDK. All cases use the socket implementation linked into the actual
 Native AOT library; the fixture does not replace its transfer or timing functions.
+
+Descriptor cases reject extra or truncated descriptor lists and check the native
+process's open-descriptor count after cleanup. A valid descriptor must carry its
+exact file bytes, have close-on-exec set, and be absent after a native child runs
+`exec`. That child performs no managed calls.
+
+`connect.py` fills a Unix listener's connection queue, verifies that finite
+connection attempts return without hanging or leaking descriptors, then empties
+the queue and checks a successful retry. It also covers zero/infinite waits,
+missing endpoints and refused connections. `reverse.py` configures an actual
+runtime diagnostic port against a full listener. The default diagnostic endpoint
+must keep answering `ProcessInfo2` requests. After the queue is emptied, three
+successive reverse connections must advertise the same runtime identity and
+answer complete protocol requests.
 
 The compiler's existing native-library EventSource warning remains visible. These
 checks exercise native endpoint cleanup only: no managed code runs in the forked

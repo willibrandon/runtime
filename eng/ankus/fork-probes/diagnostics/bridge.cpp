@@ -3,7 +3,45 @@
 #include <fcntl.h>
 #include <cstdio>
 #include <cstdlib>
+#include <cerrno>
+#include <sys/wait.h>
 #include <unistd.h>
+
+static uint32_t connect_error_code;
+
+// Capture the transport error before any cleanup can replace errno.
+static void capture_connect_error(const char* message, uint32_t code)
+{
+    (void) message;
+    connect_error_code = code;
+}
+
+// Only native exec runs in this child; this does not test managed fork reentry.
+static bool descriptor_closes_on_exec(int descriptor)
+{
+    char number[32];
+    std::snprintf(number, sizeof(number), "%d", descriptor);
+    pid_t child = fork();
+    if (child < 0)
+    {
+        return false;
+    }
+
+    if (child == 0)
+    {
+        execl("/proc/self/exe", "host", "--check-fd-closed", number, nullptr);
+        _exit(79);
+    }
+
+    int status;
+    pid_t waited;
+    do
+    {
+        waited = waitpid(child, &status, 0);
+    } while (waited < 0 && errno == EINTR);
+
+    return waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 0;
+}
 
 extern bool DiagnosticServer_Shutdown();
 extern void ds_ipc_stream_factory_close_ports(ds_ipc_error_callback_func callback);
@@ -115,13 +153,17 @@ extern "C" __attribute__((visibility("default"))) int ankus_probe_stream_io(
     }
 
     uint32_t transferred = 0;
+    int descriptor = -1;
+    int descriptor_flags = -1;
+    int exec_closed = -1;
     bool success;
     if (direction == 'f')
     {
-        int descriptor = -1;
         success = ds_ipc_stream_read_fd(stream, &descriptor);
         if (success)
         {
+            descriptor_flags = fcntl(descriptor, F_GETFD);
+            exec_closed = descriptor_closes_on_exec(descriptor) ? 1 : 0;
             ssize_t count = pread(descriptor, buffer, length, 0);
             close(descriptor);
             success = count == length;
@@ -142,9 +184,41 @@ extern "C" __attribute__((visibility("default"))) int ankus_probe_stream_io(
     }
 
     std::printf("io-result %d %u %d\n", success ? 1 : 0, transferred, valid ? 1 : 0);
+    if (direction == 'f')
+    {
+        std::printf("io-descriptor %d %d %d\n", descriptor >= 0 ? 1 : 0, descriptor_flags, exec_closed);
+    }
+
     std::fflush(stdout);
     std::free(buffer);
     ds_ipc_stream_free(stream);
     ds_ipc_free(ipc);
     return 0;
+}
+
+// Keep the listener and its backlog under the external client's control.
+extern "C" __attribute__((visibility("default"))) int ankus_probe_connect(const char* path, uint32_t timeout)
+{
+    DiagnosticsIpc* ipc = ds_ipc_alloc(path, DS_IPC_CONNECTION_MODE_CONNECT, nullptr);
+    if (ipc == nullptr)
+    {
+        return 1;
+    }
+
+    bool timed_out = true;
+    connect_error_code = 0;
+    DiagnosticsIpcStream* stream = ds_ipc_connect(ipc, timeout, capture_connect_error, &timed_out);
+    std::printf("connect-result %d %d %u\n", stream != nullptr ? 1 : 0, timed_out ? 1 : 0, connect_error_code);
+    std::fflush(stdout);
+    bool valid = true;
+    if (stream != nullptr)
+    {
+        const uint8_t message[] = {0, 1, 2, 127, 128, 254, 255};
+        uint32_t written = 0;
+        valid = ds_ipc_stream_write(stream, message, sizeof(message), &written, 1000) && written == sizeof(message);
+    }
+
+    ds_ipc_stream_free(stream);
+    ds_ipc_free(ipc);
+    return valid ? 0 : 2;
 }

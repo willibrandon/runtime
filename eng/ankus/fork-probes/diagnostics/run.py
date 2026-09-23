@@ -28,15 +28,20 @@ def receive(connection, count):
 
 
 def process_info(endpoint, expected_pid):
-    """Decode ProcessInfo2 and independently verify identity and every field boundary."""
+    """Connect to a diagnostic endpoint and verify its process identity."""
     with socket.socket(socket.AF_UNIX) as connection:
         connection.settimeout(5)
         connection.connect(str(endpoint))
-        connection.sendall(HEADER.pack(MAGIC, HEADER.size, 4, 4, 0))
-        magic, size, command_set, command, reserved = HEADER.unpack(receive(connection, HEADER.size))
-        assert (magic, command_set, command, reserved) == (MAGIC, 255, 0, 0)
-        assert HEADER.size + 24 <= size <= 65535
-        payload = receive(connection, size - HEADER.size)
+        return process_info_stream(connection, expected_pid)
+
+
+def process_info_stream(connection, expected_pid):
+    """Decode ProcessInfo2 and independently verify identity and every field boundary."""
+    connection.sendall(HEADER.pack(MAGIC, HEADER.size, 4, 4, 0))
+    magic, size, command_set, command, reserved = HEADER.unpack(receive(connection, HEADER.size))
+    assert (magic, command_set, command, reserved) == (MAGIC, 255, 0, 0)
+    assert HEADER.size + 24 <= size <= 65535
+    payload = receive(connection, size - HEADER.size)
     pid = struct.unpack_from("<Q", payload)[0]
     cookie = payload[8:24].hex()
     assert pid == expected_pid and cookie != "00" * 16

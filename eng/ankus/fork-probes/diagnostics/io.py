@@ -14,11 +14,13 @@ import tempfile
 import threading
 import time
 
+from run import process_info
+
 
 CASES = ["partial-read", "trickle-read", "interrupted-read", "blocked-write", "slow-write", "interrupted-write",
          "fragmented-read", "drained-write", "eof-read", "empty-read", "empty-write",
          "infinite-read", "infinite-write", "immediate-read", "immediate-empty-read",
-         "final-read", "descriptor-read", "descriptor-eof"]
+         "final-read", "descriptor-read", "descriptor-eof", "descriptor-two", "descriptor-three", "descriptor-missing"]
 
 LIBC = ctypes.CDLL(None, use_errno=True)
 LIBC.tgkill.argtypes = [ctypes.c_int, ctypes.c_int, ctypes.c_int]
@@ -64,6 +66,7 @@ def run_case(args, case):
                                        bufsize=0, env=env, start_new_session=True)
             try:
                 assert read_line(process) == f"ready {process.pid}"
+                evidence["fds_before"] = len(list(Path(f"/proc/{process.pid}/fd").iterdir()))
                 direction = "w" if "write" in case else "r"
                 if case.startswith("descriptor-"):
                     direction = "f"
@@ -122,14 +125,17 @@ def run_case(args, case):
                                     block = peer.recv(16384)
                                     assert block, "write ended early"
                                     transferred.extend(block)
-                            elif case == "descriptor-read":
+                            elif case in ("descriptor-read", "descriptor-two", "descriptor-three"):
                                 with tempfile.TemporaryFile(dir=directory) as source:
                                     source.write(expected)
                                     source.flush()
                                     if not stop.wait(0.08):
-                                        peer.sendmsg([b"f"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [source.fileno()]))])
+                                        count = {"descriptor-read": 1, "descriptor-two": 2, "descriptor-three": 3}[case]
+                                        peer.sendmsg([b"f"], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array("i", [source.fileno()] * count))])
                             elif case == "descriptor-eof":
                                 peer.shutdown(socket.SHUT_WR)
+                            elif case == "descriptor-missing":
+                                peer.sendall(b"f")
                         except Exception as error:
                             errors.append(repr(error))
 
@@ -139,6 +145,8 @@ def run_case(args, case):
                     process.stdin.write(b"g\n")
                     evidence["result"] = read_line(process)
                     evidence["elapsed_ms"] = (time.monotonic() - started) * 1000
+                    if direction == "f":
+                        evidence["descriptor"] = read_line(process)
                     assert read_line(process) == "io-complete 0"
                     signals = read_line(process)
                     assert signals.startswith("io-signals ")
@@ -150,14 +158,21 @@ def run_case(args, case):
                     assert not peer_thread.is_alive()
                 assert not errors, errors
                 assert not endpoint.exists(), "stream listener was not removed"
-                failed = case in ("partial-read", "trickle-read", "interrupted-read", "blocked-write", "slow-write", "interrupted-write", "eof-read", "immediate-empty-read", "descriptor-eof")
+                evidence["fds_after"] = len(list(Path(f"/proc/{process.pid}/fd").iterdir()))
+                assert evidence["fds_before"] == evidence["fds_after"], evidence
+                failed = case in ("partial-read", "trickle-read", "interrupted-read", "blocked-write", "slow-write", "interrupted-write", "eof-read", "immediate-empty-read", "descriptor-eof", "descriptor-two", "descriptor-three", "descriptor-missing")
                 assert evidence["result"] == f"io-result {0 if failed else 1} {0 if failed else size} 1", evidence
+                if direction == "f":
+                    assert evidence["descriptor"] == ("io-descriptor 0 -1 -1" if failed else "io-descriptor 1 1 1"), evidence
                 if case in ("partial-read", "trickle-read", "interrupted-read", "blocked-write", "slow-write", "interrupted-write"):
                     assert 200 <= evidence["elapsed_ms"] < 1500, evidence
                 if case == "slow-write":
                     assert 0 < len(transferred) < size and transferred == expected[:len(transferred)]
                 if case in ("drained-write", "infinite-write"):
                     assert transferred == expected, "write bytes were lost or reordered"
+                endpoints = list(Path(directory).glob(f"dotnet-diagnostic-{process.pid}-*-socket"))
+                assert len(endpoints) == 1
+                evidence["process_after"] = process_info(endpoints[0], process.pid)
                 process.stdin.write(b"q\n")
                 process.wait(timeout=3)
                 assert process.returncode == 0

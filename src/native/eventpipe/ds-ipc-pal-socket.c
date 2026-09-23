@@ -674,60 +674,57 @@ ipc_socket_connect (
 	int address_len,
 	uint32_t timeout_ms)
 {
+	IpcSocketDeadline deadline;
+	if (!ipc_deadline_init (&deadline, timeout_ms))
+		return DS_IPC_SOCKET_ERROR;
+
+	// A Unix listener with a full backlog can block connect just like a TCP handshake.
+	if (timeout_ms != IPC_TIMEOUT_INFINITE && ipc_socket_set_blocking (s, false) == DS_IPC_SOCKET_ERROR)
+		return DS_IPC_SOCKET_ERROR;
+
 	int result_connect;
-
-	// We don't expect this to block on Unix Domain Socket.  `connect` may block until the
-	// TCP handshake is complete for TCP/IP sockets. On UDS `connect` will return even if
-	// the server hasn't called `accept`, so no need to check for timeout or connect error.
-
-#if defined(DS_IPC_PAL_AF_INET) || defined(DS_IPC_PAL_AF_INET6)
-	if (timeout_ms != IPC_TIMEOUT_INFINITE) {
-		// Set socket to none blocking.
-		ipc_socket_set_blocking (s, false);
-	}
-#endif
-
-	DS_ENTER_BLOCKING_PAL_SECTION;
-	do {
+	for (;;) {
+		DS_ENTER_BLOCKING_PAL_SECTION;
 		result_connect = connect (s, address, address_len);
-	} while (ipc_retry_syscall (result_connect));
-	DS_EXIT_BLOCKING_PAL_SECTION;
+		DS_EXIT_BLOCKING_PAL_SECTION;
+		if (!ipc_retry_syscall (result_connect))
+			break;
 
-#if defined(DS_IPC_PAL_AF_INET) || defined(DS_IPC_PAL_AF_INET6)
-	if (timeout_ms != IPC_TIMEOUT_INFINITE) {
-		if (result_connect == DS_IPC_SOCKET_ERROR) {
-			if (ipc_get_last_error () == DS_IPC_SOCKET_ERROR_WOULDBLOCK) {
-				ds_ipc_pollfd_t pfd;
-				pfd.fd = s;
-				pfd.events = POLLOUT;
-				int result_poll = ipc_poll_fds (&pfd, 1, timeout_ms);
-				if (result_poll == 0) {
-					// timeout
-					ipc_set_last_error (DS_IPC_SOCKET_ERROR_TIMEDOUT);
-					result_connect = DS_IPC_SOCKET_ERROR;
-				} else if (result_poll < 0 || !(pfd.revents & POLLOUT)) {
-					// error
-					result_connect = DS_IPC_SOCKET_ERROR;
-				} else {
-					// success, check non-blocking connect result.
-					result_connect = ipc_get_last_socket_error (s);
-					if (result_connect != 0 && result_connect != DS_IPC_SOCKET_ERROR) {
-						ipc_set_last_error (result_connect);
-						result_connect = DS_IPC_SOCKET_ERROR;
-					}
-				}
-			}
+		uint32_t remaining_ms;
+		if (!ipc_deadline_remaining (&deadline, &remaining_ms))
+			return DS_IPC_SOCKET_ERROR;
+
+		if (remaining_ms == 0) {
+			ipc_set_last_error (DS_IPC_SOCKET_ERROR_TIMEDOUT);
+			return DS_IPC_SOCKET_ERROR;
 		}
 	}
 
-	if (timeout_ms != IPC_TIMEOUT_INFINITE) {
-		// Reset socket to blocking.
-		int last_error = ipc_get_last_error ();
-		ipc_socket_set_blocking (s, true);
-		ipc_set_last_error (last_error);
-	}
-#endif
+	if (timeout_ms != IPC_TIMEOUT_INFINITE && result_connect == DS_IPC_SOCKET_ERROR &&
+		ipc_get_last_error () == DS_IPC_SOCKET_ERROR_WOULDBLOCK) {
+		ds_ipc_pollfd_t fd;
+		fd.fd = s;
+		fd.events = POLLOUT;
+		fd.revents = 0;
+		int result_poll = ipc_poll_fds_with_deadline (&fd, 1, &deadline);
+		if (result_poll == 0) {
+			ipc_set_last_error (DS_IPC_SOCKET_ERROR_TIMEDOUT);
+			return DS_IPC_SOCKET_ERROR;
+		}
 
+		if (result_poll < 0)
+			return DS_IPC_SOCKET_ERROR;
+
+		// Writability can report either success or failure; SO_ERROR carries the result.
+		result_connect = ipc_get_last_socket_error (s);
+		if (result_connect != 0 && result_connect != DS_IPC_SOCKET_ERROR) {
+			ipc_set_last_error (result_connect);
+			return DS_IPC_SOCKET_ERROR;
+		}
+	}
+
+	// EAGAIN on a full Unix backlog has no pending connection to poll. Return it to
+	// the stream factory's reconnect loop, matching the managed socket implementation.
 	return result_connect;
 }
 
@@ -1356,6 +1353,7 @@ ds_ipc_connect (
 {
 	EP_ASSERT (ipc != NULL);
 	EP_ASSERT (timed_out != NULL);
+	*timed_out = false;
 
 	DiagnosticsIpcStream *stream = NULL;
 
@@ -1372,16 +1370,16 @@ ds_ipc_connect (
 	int result_connect;
 	result_connect = ipc_socket_connect (client_socket, ipc->server_address, ipc->server_address_len, timeout_ms);
 	if (result_connect < 0) {
-		if (callback && ipc_get_last_error () != DS_IPC_SOCKET_ERROR_TIMEDOUT)
-			callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
-		else if (ipc_get_last_error () == DS_IPC_SOCKET_ERROR_TIMEDOUT)
-			*timed_out = true;
+		int connect_error = ipc_get_last_error ();
+		*timed_out = connect_error == DS_IPC_SOCKET_ERROR_TIMEDOUT;
+		if (callback && !*timed_out)
+			callback (strerror (connect_error), connect_error);
 
-		int result_close;
-		result_close = ipc_socket_close (client_socket);
+		int result_close = ipc_socket_close (client_socket);
 		if (result_close < 0 && callback)
 			callback (strerror (ipc_get_last_error ()), ipc_get_last_error ());
 
+		ipc_set_last_error (connect_error);
 		ep_raise_error ();
 	}
 
@@ -1637,30 +1635,36 @@ ds_ipc_stream_read_fd (
 	EP_ASSERT (ipc_stream != NULL);
 	EP_ASSERT (data_fd != NULL);
 
+	*data_fd = -1;
 	struct msghdr msg = {0};
-
-	msg.msg_name = NULL;
-	msg.msg_namelen = 0;
-
-	struct iovec io_vec[1];
-	char buffer[1];
-	io_vec[0].iov_base = buffer;
-	io_vec[0].iov_len = 1;
-
-	msg.msg_iov = io_vec;
+	char buffer;
+	struct iovec io_vec;
+	io_vec.iov_base = &buffer;
+	io_vec.iov_len = 1;
+	msg.msg_iov = &io_vec;
 	msg.msg_iovlen = 1;
 
-	char control[CMSG_SPACE(sizeof(int))];
-	msg.msg_control = control;
-	msg.msg_controllen = sizeof(control);
+	// Align ancillary headers and inspect all delivered descriptors, including a
+	// truncated message. The kernel can fit two descriptors in this padded buffer.
+	union {
+		struct cmsghdr alignment;
+		uint8_t bytes [CMSG_SPACE (sizeof (int))];
+	} control;
+	msg.msg_control = control.bytes;
 
+	int flags = 0;
+#ifdef MSG_CMSG_CLOEXEC
+	flags = MSG_CMSG_CLOEXEC;
+#endif
 	IpcSocketDeadline deadline;
 	ipc_deadline_init (&deadline, IPC_TIMEOUT_INFINITE);
 	for (;;) {
 		if (!ipc_socket_wait (ipc_stream->client_socket, POLLIN, &deadline))
 			return false;
 
-		ssize_t res = recvmsg (ipc_stream->client_socket, &msg, 0);
+		msg.msg_controllen = sizeof (control.bytes);
+		msg.msg_flags = 0;
+		ssize_t res = recvmsg (ipc_stream->client_socket, &msg, flags);
 		if (ipc_retry_syscall (res) || (res == DS_IPC_SOCKET_ERROR && ipc_socket_would_block ()))
 			continue;
 
@@ -1670,16 +1674,51 @@ ds_ipc_stream_read_fd (
 		break;
 	}
 
-	struct cmsghdr *cmptr;
-	if ((cmptr = CMSG_FIRSTHDR(&msg)) == NULL ||
-		 cmptr->cmsg_level != SOL_SOCKET ||
-		 cmptr->cmsg_type != SCM_RIGHTS)
-		return false;
+	int received_fd = -1;
+	bool valid = (msg.msg_flags & MSG_CTRUNC) == 0;
+	for (struct cmsghdr *header = CMSG_FIRSTHDR (&msg); header != NULL; header = CMSG_NXTHDR (&msg, header)) {
+		size_t available = (uint8_t *)msg.msg_control + msg.msg_controllen - (uint8_t *)header;
+		if (header->cmsg_len < CMSG_LEN (0) || header->cmsg_len > available) {
+			valid = false;
+			break;
+		}
 
-	memcpy(data_fd, CMSG_DATA(cmptr), sizeof(int));
-	if (*data_fd < 0)
-		return false;
+		if (header->cmsg_level != SOL_SOCKET || header->cmsg_type != SCM_RIGHTS)
+			continue;
 
+		size_t data_size = header->cmsg_len - CMSG_LEN (0);
+		if (data_size % sizeof (int) != 0)
+			valid = false;
+
+		for (size_t offset = 0; offset + sizeof (int) <= data_size; offset += sizeof (int)) {
+			int descriptor;
+			memcpy (&descriptor, (uint8_t *)CMSG_DATA (header) + offset, sizeof (descriptor));
+			if (descriptor < 0) {
+				valid = false;
+			} else if (received_fd < 0) {
+				received_fd = descriptor;
+			} else {
+				ipc_socket_close (descriptor);
+				valid = false;
+			}
+		}
+	}
+
+	if (!valid || received_fd < 0) {
+		if (received_fd >= 0)
+			ipc_socket_close (received_fd);
+
+		return false;
+	}
+
+#ifndef MSG_CMSG_CLOEXEC
+	int descriptor_flags = fcntl (received_fd, F_GETFD, 0);
+	if (descriptor_flags == -1 || fcntl (received_fd, F_SETFD, descriptor_flags | FD_CLOEXEC) == -1) {
+		ipc_socket_close (received_fd);
+		return false;
+	}
+#endif
+	*data_fd = received_fd;
 	return true;
 }
 #else // HAVE_SYS_SOCKET_H && defined(SOL_SOCKET) && defined(SCM_RIGHTS) && defined(CMSG_SPACE) && defined(CMSG_FIRSTHDR) && defined(CMSG_DATA)

@@ -1,9 +1,11 @@
 #include <dlfcn.h>
 #include <errno.h>
+#include <fcntl.h>
 #include <stdbool.h>
 #include <signal.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <sys/types.h>
 #include <sys/wait.h>
@@ -15,6 +17,7 @@ typedef bool (*shutdown_fn)(bool);
 typedef int (*listen_failure_fn)(const char*);
 typedef int32_t (*enable_fn)(void);
 typedef int (*stream_io_fn)(const char*, char, uint32_t, uint32_t);
+typedef int (*connect_fn)(const char*, uint32_t);
 static volatile sig_atomic_t interrupt_count;
 
 /* Interrupt blocking system calls without terminating the probe. */
@@ -37,6 +40,18 @@ report(int32_t marker, int64_t value)
 int
 main(int argc, char **argv)
 {
+    if (argc == 3 && strcmp(argv[1], "--check-fd-closed") == 0)
+    {
+        char* end;
+        long descriptor = strtol(argv[2], &end, 10);
+        if (*end != '\0' || descriptor < 0 || descriptor > INT32_MAX)
+        {
+            return 78;
+        }
+
+        return fcntl((int) descriptor, F_GETFD) == -1 && errno == EBADF ? 0 : 79;
+    }
+
     if (argc != 2)
     {
         return 64;
@@ -54,6 +69,7 @@ main(int argc, char **argv)
     listen_failure_fn listen_failure = (listen_failure_fn) dlsym(library, "ankus_probe_listen_failure");
     enable_fn enable = (enable_fn) dlsym(library, "RhEnableForkSupport");
     stream_io_fn stream_io = (stream_io_fn) dlsym(library, "ankus_probe_stream_io");
+    connect_fn connect_client = (connect_fn) dlsym(library, "ankus_probe_connect");
     if (initialize == NULL || shutdown_server == NULL || listen_failure == NULL || enable == NULL || initialize(getpid(), report) != 0)
     {
         return 71;
@@ -109,6 +125,17 @@ main(int argc, char **argv)
         else if (command[0] == 'q')
         {
             return 0;
+        }
+        else if (command[0] == 'k')
+        {
+            char path[192];
+            uint32_t timeout;
+            if (connect_client == NULL || sscanf(command + 1, "%u %191s", &timeout, path) != 2)
+            {
+                return 75;
+            }
+
+            printf("connect-complete %d\n", connect_client(path, timeout));
         }
         else if (command[0] == 'i')
         {

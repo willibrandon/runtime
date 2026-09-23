@@ -15,6 +15,8 @@
     <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
   </PropertyGroup>
   <ItemGroup>
+    <IlcArg Include="--export-dynamic-symbol:ankus_probe_connect" />
+    <LinkerArg Include="-Wl,--undefined=ankus_probe_connect" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_stream_io" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_stream_io" />
     <NativeLibrary Include="$(MSBuildProjectDirectory)/obj/diagnostics-bridge.o" />
