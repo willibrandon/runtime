@@ -475,9 +475,23 @@ namespace
         }
 
         if (!HasSupportedConfiguration() || !RhIsGCReadyForFork() ||
-            GCHeapUtilities::IsGCInProgress(TRUE) || !ResetHostThreadState())
+            GCHeapUtilities::IsGCInProgress(TRUE))
         {
-            ForkFailure("NativeAOT fork support: host did not return to one native thread.\n");
+            ForkFailure("NativeAOT fork support: host runtime did not become dormant.\n");
+        }
+
+        // Darwin wakes pthread_join before __bsdthread_terminate has removed the
+        // kernel thread from task_threads. Wait for that asynchronous teardown
+        // before resetting libpthread's single-threaded state.
+        attempts = 0;
+        while (!ResetHostThreadState())
+        {
+            if (++attempts == 10000)
+            {
+                ForkFailure("NativeAOT fork support: host native threads did not finish teardown.\n");
+            }
+
+            PalSleep(1);
         }
 
         s_state.store(ForkState::Dormant);
