@@ -857,6 +857,11 @@ bool PalJoinThread(void* handle)
     return true;
 }
 
+void PalDiscardThreadHandle(void* handle)
+{
+    delete static_cast<pthread_t*>(handle);
+}
+
 bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_TRUE);

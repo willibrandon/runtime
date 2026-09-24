@@ -24,6 +24,9 @@
 #include "ForkSupport.h"
 
 GPTR_DECL(Thread, g_pFinalizerThread);
+#ifdef TARGET_UNIX
+static void* g_pFinalizerThreadHandle;
+#endif
 
 CLREventStatic g_FinalizerEvent;
 CLREventStatic g_FinalizerDoneEvent;
@@ -100,10 +103,36 @@ bool RhInitializeFinalization()
     g_lowMemoryNotification = PalCreateLowMemoryResourceNotification();
 
     // Create the finalizer thread itself.
+#ifdef TARGET_UNIX
+    if (!PalStartJoinableThread(FinalizerStart, (void*)g_FinalizerEvent.GetOSEvent(), &g_pFinalizerThreadHandle))
+#else
     if (!PalStartFinalizerThread(FinalizerStart, (void*)g_FinalizerEvent.GetOSEvent()))
+#endif
         return false;
 
     return true;
+}
+
+bool RhJoinFinalization()
+{
+#ifdef TARGET_UNIX
+    void* handle = g_pFinalizerThreadHandle;
+    if (handle != nullptr && !PalJoinThread(handle))
+    {
+        return false;
+    }
+
+    g_pFinalizerThreadHandle = nullptr;
+#endif
+    return true;
+}
+
+void RhDiscardFinalizationAfterFork()
+{
+#ifdef TARGET_UNIX
+    PalDiscardThreadHandle(g_pFinalizerThreadHandle);
+    g_pFinalizerThreadHandle = nullptr;
+#endif
 }
 
 // The old finalizer has detached through its normal thread cleanup path, so both

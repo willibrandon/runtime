@@ -26,6 +26,8 @@ extern "C" int __is_threaded;
 #endif
 
 void RhEnableFinalization();
+void RhDiscardFinalizationAfterFork();
+bool RhJoinFinalization();
 bool RhRestartFinalization();
 
 namespace
@@ -322,6 +324,7 @@ namespace
             ForkFailure("NativeAOT fork support: child diagnostics reset failed.\n");
         }
 
+        RhDiscardFinalizationAfterFork();
         if (!RhRestartFinalization())
         {
             ForkFailure("NativeAOT fork support: failed to restart child finalization.\n");
@@ -464,6 +467,11 @@ namespace
             }
 
             PalSleep(1);
+        }
+
+        if (!RhJoinFinalization())
+        {
+            ForkFailure("NativeAOT fork support: host finalizer did not finish native teardown.\n");
         }
 
         if (!HasSupportedConfiguration() || !RhIsGCReadyForFork() ||
