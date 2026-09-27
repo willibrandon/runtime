@@ -10,6 +10,12 @@ The retained-service host calls `RhEnterForkHost` and `RhExitForkHost` around la
 managed callbacks. The active-GC host performs its stress forks from the first
 recovered child, where the runtime can remain active between managed calls.
 
+The ordinary retained-service host also performs 2,048 short host callbacks
+before its fork checks. Every cycle verifies the original managed token and
+initialization count, then retires the finalizer completely. This exercises
+checkpoint publication against a finalizer already approaching its native wait.
+The existing native supervisor bounds the entire run, including retirement.
+
 Build the runtime's Release nativeaot component and CoreLib first. Set
 `ANKUS_AOT_SDK` to the absolute `artifacts/bin/coreclr/linux.x64.Release/aotsdk`
 directory produced by those builds. The probes pin the matching .NET SDK and

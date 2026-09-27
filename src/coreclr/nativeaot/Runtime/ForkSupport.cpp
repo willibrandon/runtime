@@ -404,6 +404,16 @@ namespace
             ForkFailure("NativeAOT fork support: host GC did not retire its collectors.\n");
         }
 
+        // Publish the complete request before allowing the finalizer to observe
+        // Preparing. Otherwise it can acknowledge the previous sequence, observe
+        // the new exit flag and detach without acknowledging this retirement.
+        uint32_t request = s_request.fetch_add(1) + 1;
+        if (request == 0)
+        {
+            ForkFailure("NativeAOT fork support: checkpoint sequence exhausted.\n");
+        }
+
+        s_finalizerExit.store(true);
         ThreadStore* store = GetThreadStore();
         uint32_t attempts = 0;
         while (true)
@@ -430,13 +440,6 @@ namespace
             PalSleep(1);
         }
 
-        uint32_t request = s_request.fetch_add(1) + 1;
-        if (request == 0)
-        {
-            ForkFailure("NativeAOT fork support: checkpoint sequence exhausted.\n");
-        }
-
-        s_finalizerExit.store(true);
         RhEnableFinalization();
         attempts = 0;
         while (s_acknowledged.load() != request)

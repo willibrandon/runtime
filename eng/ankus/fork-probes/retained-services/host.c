@@ -1129,6 +1129,29 @@ run_worker(struct options options)
         return run_descendants(options, library, run, parent, token_low, token_high);
     }
 
+    if (options.enable)
+    {
+        // Short host callbacks race the finalizer's acknowledgement against
+        // retirement publication. Each exit must fully detach that finalizer
+        // before the next resume, while retaining the original managed state.
+        current_stage = "host-retirement-stress";
+        for (int cycle = 0; cycle < 2048; cycle++)
+        {
+            if (!enter_managed_host())
+            {
+                return 3;
+            }
+
+            bool preserved = snapshot(1) == token_low && snapshot(2) == token_high && snapshot(3) == 1;
+            if (!exit_managed_host() || !preserved)
+            {
+                return 3;
+            }
+        }
+
+        emit("host-retirements", 0, 2048);
+    }
+
     int failures = 0;
     for (int round = 1; round <= options.rounds; round++)
     {
