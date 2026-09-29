@@ -792,6 +792,19 @@ void RhForkRegisterFinalizer(Thread* thread)
 
 void RhForkThreadShutdownStarted()
 {
+    // Native TLS destruction can end the dormant host's owner without another
+    // explicit host entry. Detachment invokes managed Thread.OnThreadExit, which
+    // must signal joins and abandon mutexes with a running GC and open admission.
+    // Resume before counting this shutdown; service callbacks may themselves
+    // attach or retire threads. The exiting owner never retires the host again.
+    if (s_state.load() == ForkState::Dormant && ThreadStore::RawGetCurrentThread() == s_owner)
+    {
+        if (RhEnterForkHost() != 1)
+        {
+            ForkFailure("NativeAOT fork support: failed to resume the exiting host owner.\n");
+        }
+    }
+
     if (s_threadShutdowns.fetch_add(1) == UINT32_MAX)
     {
         ForkFailure("NativeAOT fork support: thread shutdown accounting overflowed.\n");

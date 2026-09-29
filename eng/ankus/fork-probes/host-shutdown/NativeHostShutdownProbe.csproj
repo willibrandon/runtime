@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <UseNativeLibPrefix>false</UseNativeLibPrefix>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup>
+    <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+  </ItemGroup>
+</Project>

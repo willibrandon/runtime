@@ -124,3 +124,9 @@ concurrent collection; a startup fallback must not publish an unfinished BGC rec
 These checks do not establish enabled EventPipe or other platforms.
 The exported fork symbols are a native test-host interface; ordinary extension
 libraries must keep their runtime symbols local.
+
+The [dormant host shutdown checks](host-shutdown/README.md) run on Linux x64 and
+macOS ARM64. They cover ordinary process exit and native owner thread exit with
+managed join/mutex cleanup, allocation, collection and finalizer drain. All three
+macOS cases hang before the correction; Linux reproduces the native thread-exit
+hang. The corrected Release runtime passes all three cases on both platforms.
