@@ -31,6 +31,7 @@ python3 reverse.py --host ./host --library publish/NativeDiagnosticsProbe.so --o
 python3 listener.py --host ./host --library publish/NativeDiagnosticsProbe.so --output listener-results
 python3 response.py --host ./host --library publish/NativeDiagnosticsProbe.so --output response-results
 python3 tracing.py --host ./host --library publish/NativeDiagnosticsProbe.so --output tracing-results
+python3 fork.py --host ./host --library publish/NativeDiagnosticsProbe.so --output fork-results
 ```
 
 Set `ANKUS_AOT_SDK` to the SDK directory produced by the owned runtime build. Use a
@@ -82,13 +83,22 @@ Linux can wake `pthread_join` before removing the thread from `/proc`. The probe
 requires any residual task to have `PF_EXITING`, then requires its disappearance
 within a bounded wait before checking the paused state.
 
-The compiler's existing native-library EventSource warning remains visible. These
-checks do not enable managed fork support with diagnostics. Native cleanup tests
-fork without managed child calls; listener tests stop and restart without forking.
+The compiler's existing native-library EventSource warning remains visible.
+Native cleanup tests fork without managed child calls; listener tests stop and
+restart without forking.
 Command and tracing responses now preserve queued output. Linux UserEvents
 descriptor receipt can also stop and resume with the listener. A tracing session
 starts only after its complete success response is delivered. Active tracing and
 sampling threads stop and restart without ending their sessions. Blocked and
 partially sent trace output survives repeated checkpoints, and the saved trace
-must open with `dotnet-trace report`. Child recovery and multiple runtime instances
-still need coverage.
+must open with `dotnet-trace report`.
+
+`fork.py` enables managed fork support, then enters an explicit native host scope
+before requesting diagnostics. Enabling fork support leaves the original host
+dormant; its listener resumes inside that scope. Three successive children must
+receive independent process identities and diagnostic endpoints, retain no parent
+sockets, execute managed work, and produce complete sampling traces while the
+parent retains its own partially sent trace. Child shutdown removes only the
+child endpoint; the parent remains queryable. The host exits its scope after
+diagnostic shutdown. These are Linux component checks, not PostgreSQL or complete
+platform validation.

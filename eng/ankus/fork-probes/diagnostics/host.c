@@ -177,6 +177,8 @@ main(int argc, char **argv)
     shutdown_fn shutdown_server = (shutdown_fn) dlsym(library, "ankus_probe_diagnostics_shutdown");
     listen_failure_fn listen_failure = (listen_failure_fn) dlsym(library, "ankus_probe_listen_failure");
     enable_fn enable = (enable_fn) dlsym(library, "RhEnableForkSupport");
+    enable_fn enter_fork_host = (enable_fn) dlsym(library, "RhEnterForkHost");
+    enable_fn exit_fork_host = (enable_fn) dlsym(library, "RhExitForkHost");
     stream_io_fn stream_io = (stream_io_fn) dlsym(library, "ankus_probe_stream_io");
     connect_fn connect_client = (connect_fn) dlsym(library, "ankus_probe_connect");
     listener_fn listener_checkpoint = (listener_fn) dlsym(library, "ankus_probe_listener_checkpoint");
@@ -238,6 +240,17 @@ main(int argc, char **argv)
         else if (command[0] == 'e')
         {
             printf("enable %d\n", enable());
+        }
+        else if (command[0] == 'u')
+        {
+            int enter;
+            if (enter_fork_host == NULL || exit_fork_host == NULL ||
+                sscanf(command + 1, "%d", &enter) != 1 || (enter != 0 && enter != 1))
+            {
+                return 76;
+            }
+
+            printf("fork-host %d\n", enter ? enter_fork_host() : exit_fork_host());
         }
         else if (command[0] == 'z')
         {

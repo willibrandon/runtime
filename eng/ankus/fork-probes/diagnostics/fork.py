@@ -69,6 +69,10 @@ def main():
                 parent_endpoint = endpoint_for(directory, process.pid)
                 parent_identity = process_info(parent_endpoint, process.pid)
                 assert command(process, "e") == "enable 1"
+                # The original host is dormant after enable. Keep a native host
+                # scope open while the client exercises its listener and forks.
+                assert command(process, "u 1") == "fork-host 1"
+                assert process_info(parent_endpoint, process.pid) == parent_identity
 
                 with connect(parent_endpoint) as parent_peer:
                     request(parent_peer, 6, collect_body(sampling=True))
@@ -144,6 +148,7 @@ def main():
                 parent_path.write_bytes(parent_trace)
                 assert command(process, "s") == "shutdown 1"
                 assert not parent_endpoint.exists()
+                assert command(process, "u 0") == "fork-host 1"
                 evidence.update({
                     "parent_trace_bytes": len(parent_trace),
                     "parent_trace": str(parent_path),

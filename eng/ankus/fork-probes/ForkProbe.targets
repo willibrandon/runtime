@@ -1,0 +1,17 @@
+<Project>
+  <PropertyGroup>
+    <RuntimeFrameworkVersion>10.0.12</RuntimeFrameworkVersion>
+  </PropertyGroup>
+
+  <Target Name="_SelectForkProbeCompiler" BeforeTargets="ProcessFrameworkReferences"
+          Condition="'$(PublishAot)' == 'true'">
+    <Error Condition="'$(TargetFramework)' != 'net10.0'"
+           Text="These fork probes require the net10.0 target matching the runtime under test." />
+    <ItemGroup>
+      <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler"
+                           Condition="'%(KnownILCompilerPack.TargetFramework)' == '$(TargetFramework)'">
+        <ILCompilerPackVersion>10.0.12</ILCompilerPackVersion>
+      </KnownILCompilerPack>
+    </ItemGroup>
+  </Target>
+</Project>

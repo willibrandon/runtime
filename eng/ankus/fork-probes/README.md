@@ -21,6 +21,18 @@ Build the runtime's Release nativeaot component and CoreLib first. Set
 directory produced by those builds. The probes pin the matching .NET SDK and
 compiler; use that SDK's `dotnet` command from each probe directory.
 
+`ForkProbe.targets` selects the .NET 10.0.12 framework and ILCompiler packs
+independently of the installed SDK patch. The supplied `ANKUS_AOT_SDK` must be
+the patched runtime built from the same upstream release. A .NET SDK update
+alone must not change which runtime/compiler combination these checks exercise.
+
+The .NET 10.0.12 servicing candidate passes the retained-service and descendant
+checks, workstation and server active-GC checks (fixed and dynamic heap counts),
+independent debugger-image checks, and diagnostics transport, ownership, listener,
+tracing and managed-fork checks on Linux x64. The three managed-fork child traces
+and their parent's trace open with `dotnet-trace report`. PostgreSQL and other
+platform validation are tracked by Ankus separately.
+
 From `retained-services`:
 
 ```sh

@@ -32,8 +32,12 @@
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_listen_failure" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_listen_failure" />
     <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnterForkHost" />
+    <IlcArg Include="--export-dynamic-symbol:RhExitForkHost" />
     <IlcArg Include="--export-dynamic-symbol:ankus_probe_diagnostics_shutdown" />
     <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=RhEnterForkHost" />
+    <LinkerArg Include="-Wl,--undefined=RhExitForkHost" />
     <LinkerArg Include="-Wl,--undefined=ankus_probe_diagnostics_shutdown" />
   </ItemGroup>
   <ItemGroup Condition="'$(ProbeAllocationFailures)' == 'true'">
