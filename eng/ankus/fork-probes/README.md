@@ -130,3 +130,8 @@ macOS ARM64. They cover ordinary process exit and native owner thread exit with
 managed join/mutex cleanup, allocation, collection and finalizer drain. All three
 macOS cases hang before the correction; Linux reproduces the native thread-exit
 hang. The corrected Release runtime passes all three cases on both platforms.
+
+The [chained signal-mask checks](signal-mask/README.md) verify that activation
+handling preserves the native host's signal mask on both ordinary and alternate
+stacks. A forked child must defer termination until its own handlers are ready.
+Run both the direct runtime-object check and the real Native AOT library check.

@@ -18,23 +18,23 @@ bool AddSignalHandler(int signal, SignalHandler handler, struct sigaction* previ
     newAction.sa_sigaction = handler;
     newAction.sa_flags |= SA_SIGINFO;
 
-    sigemptyset(&newAction.sa_mask);
-
     if (sigaction(signal, NULL, previousAction) == -1)
     {
         ASSERT_UNCONDITIONALLY("Failed to get previous signal handler");
         return false;
     }
 
+    // Chaining the host's handler must preserve the signals it blocks, even
+    // when that handler runs on the ordinary stack. A host can rely on this
+    // mask while forking and installing the child's signal handlers.
+    newAction.sa_mask = previousAction->sa_mask;
+
     if (previousAction->sa_flags & SA_ONSTACK)
     {
         // If the previous signal handler uses an alternate stack, we need to use it too
         // so that when we chain-call the previous handler, it is called on the kind of
         // stack it expects.
-        // We also copy the signal mask to make sure that if some signals were blocked
-        // from execution on the alternate stack by the previous action, we honor that.
         newAction.sa_flags |= SA_ONSTACK;
-        newAction.sa_mask = previousAction->sa_mask;
     }
 
     if (sigaction(signal, &newAction, previousAction) == -1)
