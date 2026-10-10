@@ -667,6 +667,22 @@ namespace System.Runtime
         [RuntimeImport(RuntimeLibrary, "RhGetDefaultStackSize")]
         internal static extern unsafe IntPtr RhGetDefaultStackSize();
 
+#if TARGET_UNIX
+        /// <summary>
+        /// Blocks the calling thread's asynchronous signals so a thread it creates inherits that mask.
+        /// </summary>
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhBeginThreadCreation")]
+        internal static extern void RhBeginThreadCreation();
+
+        /// <summary>
+        /// Restores the signal mask saved by <see cref="RhBeginThreadCreation"/>.
+        /// </summary>
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhEndThreadCreation")]
+        internal static extern void RhEndThreadCreation();
+#endif
+
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         [RuntimeImport("*", "RhGetCurrentThunkContext")]
         internal static extern IntPtr GetCurrentInteropThunkContext();

@@ -135,3 +135,7 @@ The [chained signal-mask checks](signal-mask/README.md) verify that activation
 handling preserves the native host's signal mask on both ordinary and alternate
 stacks. A forked child must defer termination until its own handlers are ready.
 Run both the direct runtime-object check and the real Native AOT library check.
+
+The [host signal checks](host-signals/README.md) send PostgreSQL's signals to a
+process whose host thread blocks them. Runtime threads must leave each one
+pending for the host thread, while collections can still suspend managed code.

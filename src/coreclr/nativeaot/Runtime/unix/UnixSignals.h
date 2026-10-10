@@ -9,7 +9,10 @@
 #ifdef SIGRTMIN
 #define INJECT_ACTIVATION_SIGNAL SIGRTMIN
 #else
-#define INJECT_ACTIVATION_SIGNAL SIGUSR1
+// Native hosts send SIGUSR1 to their own processes; PostgreSQL uses it for
+// interprocess notifications that its main thread must handle. Without
+// real-time signals, use SIGIO: hosts rarely request it and it is ignored by default.
+#define INJECT_ACTIVATION_SIGNAL SIGIO
 #endif
 
 typedef void (*SignalHandler)(int code, siginfo_t* siginfo, void* context);

@@ -190,6 +190,77 @@ void PalGetPDBInfo(HANDLE hOsHandle, GUID * pGuidSignature, _Out_ uint32_t * pdw
 #endif
 }
 
+// The kernel delivers a signal sent to the process to any thread that does not
+// block it, and native hosts expect their handlers to run on their own threads.
+// A new thread inherits its creator's mask, so creators block every asynchronous
+// signal around pthread_create; attaching to the runtime unmasks only activation.
+// Faults remain deliverable to the thread that raises them.
+static int BlockAsyncSignals(sigset_t* previous)
+{
+#ifdef HOST_WASM
+    return 0;
+#else
+    sigset_t signal_set;
+    sigfillset(&signal_set);
+    sigdelset(&signal_set, SIGSEGV);
+    sigdelset(&signal_set, SIGBUS);
+    sigdelset(&signal_set, SIGFPE);
+    sigdelset(&signal_set, SIGILL);
+    sigdelset(&signal_set, SIGTRAP);
+    sigdelset(&signal_set, SIGABRT);
+    sigdelset(&signal_set, SIGSYS);
+    return pthread_sigmask(SIG_BLOCK, &signal_set, previous);
+#endif
+}
+
+static void RestoreSignalMask(const sigset_t* previous)
+{
+#ifndef HOST_WASM
+    int sigmaskRet = pthread_sigmask(SIG_SETMASK, previous, NULL);
+    _ASSERTE(sigmaskRet == 0);
+#endif
+}
+
+typedef void (*ThreadCreationCallback)();
+static ThreadCreationCallback g_threadCreationCallback;
+
+// A host can prepare for each runtime thread on the creating thread before the
+// thread starts. On Apple, sigprocmask changes every thread's mask, so a host
+// may need to route its own signals rather than rely on the masks set here.
+extern "C" __attribute__((visibility("default"))) void RhSetThreadCreationCallback(ThreadCreationCallback callback)
+{
+    g_threadCreationCallback = callback;
+}
+
+static void NotifyThreadCreation()
+{
+    ThreadCreationCallback callback = g_threadCreationCallback;
+    if (callback != nullptr)
+    {
+        callback();
+    }
+}
+
+static thread_local sigset_t t_threadCreationMask;
+static thread_local bool t_threadCreationMasked;
+
+// Managed threads start through System.Native, so CoreLib brackets that call.
+extern "C" void RhBeginThreadCreation()
+{
+    NotifyThreadCreation();
+    t_threadCreationMasked = BlockAsyncSignals(&t_threadCreationMask) == 0;
+    _ASSERTE(t_threadCreationMasked);
+}
+
+extern "C" void RhEndThreadCreation()
+{
+    if (t_threadCreationMasked)
+    {
+        t_threadCreationMasked = false;
+        RestoreSignalMask(&t_threadCreationMask);
+    }
+}
+
 static void UnmaskActivationSignal()
 {
     sigset_t signal_set;
@@ -821,8 +892,16 @@ bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCa
     st = pthread_attr_setdetachstate(&attrs, joinableThread != nullptr ? PTHREAD_CREATE_JOINABLE : PTHREAD_CREATE_DETACHED);
     ASSERT(st == 0);
 
+    NotifyThreadCreation();
+    sigset_t previousMask;
+    int maskStatus = BlockAsyncSignals(&previousMask);
+    ASSERT(maskStatus == 0);
     pthread_t threadId;
     st = pthread_create(&threadId, &attrs, (void *(*)(void*))callback, pCallbackContext);
+    if (maskStatus == 0)
+    {
+        RestoreSignalMask(&previousMask);
+    }
 
     if (st == 0 && joinableThread != nullptr)
     {
