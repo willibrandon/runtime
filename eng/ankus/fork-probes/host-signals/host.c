@@ -25,6 +25,21 @@ typedef void (*set_creation_callback)(creation_callback);
 static const int host_signals[] = {SIGHUP, SIGINT, SIGQUIT, SIGALRM, SIGTERM, SIGUSR1, SIGUSR2, SIGURG, SIGCHLD};
 #define HOST_SIGNAL_COUNT (sizeof(host_signals) / sizeof(host_signals[0]))
 
+#ifdef __APPLE__
+#define ACTIVATION_SIGNAL SIGIO
+#else
+#define ACTIVATION_SIGNAL SIGRTMIN
+#endif
+
+// How the activation signal is set when the library loads. A parent that once caught it can leave
+// the default or ignored action with SA_SIGINFO still set, and the runtime must not chain to either.
+enum activation_state
+{
+    activation_untouched,
+    activation_default,
+    activation_ignored,
+};
+
 static pthread_t host_thread;
 static volatile sig_atomic_t on_host[HOST_SIGNAL_COUNT];
 static volatile sig_atomic_t off_host[HOST_SIGNAL_COUNT];
@@ -103,9 +118,29 @@ static void pause_milliseconds(long milliseconds)
     }
 }
 
-static int run_case(const char* library_path)
+static int set_activation(enum activation_state state)
+{
+    if (state == activation_untouched)
+    {
+        return 0;
+    }
+
+    struct sigaction action;
+    memset(&action, 0, sizeof(action));
+    action.sa_handler = state == activation_default ? SIG_DFL : SIG_IGN;
+    action.sa_flags = SA_SIGINFO | SA_RESTART;
+    sigemptyset(&action.sa_mask);
+    return sigaction(ACTIVATION_SIGNAL, &action, NULL);
+}
+
+static int run_case(const char* library_path, enum activation_state state)
 {
     host_thread = pthread_self();
+    if (set_activation(state) != 0)
+    {
+        return 17;
+    }
+
     sigset_t host_set;
     sigemptyset(&host_set);
     struct sigaction action;
@@ -203,33 +238,24 @@ static int run_case(const char* library_path)
     return failures == 0 && collected == 0 && stopped == 0 ? 73 : 1;
 }
 
-int main(int argc, char** argv)
+static const char* const state_names[] = {"untouched", "default", "ignored"};
+
+// Runs one case in a fresh process, so a hang is a bounded failure, never a skipped case.
+static int supervise(const char* host, const char* library, enum activation_state state)
 {
-    if (argc == 3 && strcmp(argv[2], "--case") == 0)
-    {
-        return run_case(argv[1]);
-    }
-
-    if (argc != 2)
-    {
-        fprintf(stderr, "usage: %s library\n", argv[0]);
-        return 2;
-    }
-
     fflush(NULL);
     pid_t child = fork();
     if (child == -1)
     {
-        return 3;
+        return 0;
     }
 
     if (child == 0)
     {
-        execl(argv[0], argv[0], argv[1], "--case", (char*)NULL);
+        execl(host, host, library, "--case", state_names[state], (char*)NULL);
         _exit(4);
     }
 
-    // A hang is a bounded failure, never a skipped case.
     int status = 0;
     pid_t waited = 0;
     for (int elapsed = 0; elapsed < 300 && waited == 0; elapsed++)
@@ -245,11 +271,41 @@ int main(int argc, char** argv)
     {
         kill(child, SIGKILL);
         waitpid(child, &status, 0);
-        printf("host signals: FAIL (timed out)\n");
-        return 1;
+        printf("host signals, activation %s: FAIL (timed out)\n", state_names[state]);
+        return 0;
     }
 
     int passed = waited == child && WIFEXITED(status) && WEXITSTATUS(status) == 73;
-    printf("host signals: %s (wait status %d)\n", passed ? "PASS" : "FAIL", status);
+    printf("host signals, activation %s: %s (wait status %d)\n", state_names[state], passed ? "PASS" : "FAIL", status);
+    return passed;
+}
+
+int main(int argc, char** argv)
+{
+    if (argc == 4 && strcmp(argv[2], "--case") == 0)
+    {
+        for (int state = activation_untouched; state <= activation_ignored; state++)
+        {
+            if (strcmp(argv[3], state_names[state]) == 0)
+            {
+                return run_case(argv[1], (enum activation_state)state);
+            }
+        }
+
+        return 2;
+    }
+
+    if (argc != 2)
+    {
+        fprintf(stderr, "usage: %s library\n", argv[0]);
+        return 2;
+    }
+
+    int passed = 1;
+    for (int state = activation_untouched; state <= activation_ignored; state++)
+    {
+        passed &= supervise(argv[0], argv[1], (enum activation_state)state);
+    }
+
     return passed ? 0 : 1;
 }

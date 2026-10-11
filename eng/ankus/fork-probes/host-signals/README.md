@@ -14,6 +14,14 @@ activation signal. The host also registers `RhSetThreadCreationCallback` before
 the first managed call; it must run before every runtime thread starts, on the
 creating thread. The case runs in a fresh process with a 30-second deadline.
 
+The supervisor repeats the case with the runtime's activation signal (`SIGIO`
+on macOS, `SIGRTMIN` elsewhere) first set to the default and then the ignored
+action with `SA_SIGINFO` still set. A process whose parent once caught that
+signal can start this way; GitHub's macOS 26 Intel runners do. The runtime must
+install its own handler without chaining to either action. Before upstream's
+correction, chaining called a null `sa_sigaction`: the process crashed, or hung
+in the signal trampoline.
+
 On macOS, `sigprocmask` changes every thread's mask, so a host that calls it
 unblocks these signals on runtime threads again. Such a host uses the creation
 callback to route its own handlers to its thread instead.
