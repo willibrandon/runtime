@@ -18,6 +18,7 @@
     <PackageDownloadAndReference Include="NuGet.Versioning" Version="$(NugetVersioningVersion)" Folder="lib/net8.0" /> -->
     <PackageReference Include="NuGet.Frameworks" Version="$(NugetFrameworksVersion)" />
     <PackageReference Include="NuGet.Packaging" Version="$(NugetPackagingVersion)" />
+    <PackageReference Include="System.Security.Cryptography.Pkcs" Version="$(SystemSecurityCryptographyPkcsVersion)" />
     <PackageReference Include="NuGet.ProjectModel" Version="$(NugetProjectModelVersion)" />
     <PackageReference Include="NuGet.Versioning" Version="$(NugetVersioningVersion)" />
   </ItemGroup>

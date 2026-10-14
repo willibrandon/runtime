@@ -105,6 +105,8 @@
     <SystemSecurityAccessControlVersion>6.0.0</SystemSecurityAccessControlVersion>
     <SystemSecurityCryptographyCngVersion>5.0.0</SystemSecurityCryptographyCngVersion>
     <SystemSecurityCryptographyOpenSslVersion>5.0.0</SystemSecurityCryptographyOpenSslVersion>
+    <!-- NuGet.Packaging brings Pkcs to the build tasks; 10.0.13 fixes CVE-2026-70162 and CVE-2026-84008 in 9.0.6. -->
+    <SystemSecurityCryptographyPkcsVersion>10.0.13</SystemSecurityCryptographyPkcsVersion>
     <SystemSecurityPrincipalWindowsVersion>5.0.0</SystemSecurityPrincipalWindowsVersion>
     <SystemSecurityPermissionsVersion>7.0.0</SystemSecurityPermissionsVersion>
     <!-- Keep toolset versions in sync with dotnet/msbuild and dotnet/sdk -->
