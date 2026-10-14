@@ -845,13 +845,21 @@ ipc_stream_poll_func (
 	return IPC_POLL_EVENTS_UNKNOWN;
 }
 
+static
+void
+ipc_stream_abandon_fork_func (void *object)
+{
+	(void)object;
+}
+
 static IpcStreamVtable ipc_stream_vtable = {
 	ipc_stream_free_func,
 	ipc_stream_read_func,
 	ipc_stream_write_func,
 	ipc_stream_flush_func,
 	ipc_stream_close_func,
-	ipc_stream_poll_func };
+	ipc_stream_poll_func,
+	ipc_stream_abandon_fork_func };
 
 static
 DiagnosticsIpcStream *

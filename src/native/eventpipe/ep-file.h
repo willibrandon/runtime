@@ -48,6 +48,7 @@ struct _EventPipeFile_Internal {
 	uint32_t stack_id_counter;
 	volatile uint32_t metadata_id_counter;
 	volatile uint32_t initialized;
+	bool fork_abandoned;
 	// The format to serialize.
 	EventPipeSerializationFormat format;
 };
@@ -69,6 +70,7 @@ ep_file_has_errors (EventPipeFile *file)
 	return (ep_file_get_fast_serializer (file) == NULL) || ep_fast_serializer_get_write_error_encountered (ep_file_get_fast_serializer (file));
 }
 
+// Takes ownership of stream_writer on success; failure leaves it with the caller.
 EventPipeFile *
 ep_file_alloc (
 	StreamWriter *stream_writer,
@@ -76,6 +78,8 @@ ep_file_alloc (
 
 void
 ep_file_free (EventPipeFile *file);
+
+void ep_file_abandon_for_fork (EventPipeFile *file);
 
 bool
 ep_file_initialize_file (EventPipeFile *file);

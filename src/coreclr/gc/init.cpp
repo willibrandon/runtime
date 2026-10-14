@@ -257,7 +257,28 @@ void gc_heap::destroy_thread_support ()
 bool gc_heap::create_gc_thread ()
 {
     dprintf (3, ("Creating gc thread\n"));
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+    s_forkServerThreadsRunning.fetch_add(1);
+    if (heap_number == 0)
+    {
+        s_forkServerCoordinatorRunning.store(true);
+    }
+
+    if (!RhCreateServerGCThreadForFork(gc_thread_stub, this, &s_forkServerThreads[heap_number]))
+    {
+        s_forkServerThreadsRunning.fetch_sub(1);
+        if (heap_number == 0)
+        {
+            s_forkServerCoordinatorRunning.store(false);
+        }
+
+        return false;
+    }
+
+    return true;
+#else
     return GCToEEInterface::CreateThread(gc_thread_stub, this, false, ".NET Server GC");
+#endif
 }
 
 #ifdef _MSC_VER
@@ -271,8 +292,35 @@ void gc_heap::gc_thread_function ()
 
     heap_select::init_cpu_mapping(heap_number);
 
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+#ifdef DYNAMIC_HEAP_COUNT
+    bool resumeInactive = s_forkServerRestart &&
+        dynamic_adaptation_mode == dynamic_adaptation_to_application_sizes && heap_number >= n_heaps;
+#endif
+    // Publish startup only after the initial wait branch is fixed. Heap zero is
+    // started last during recovery and cannot change heap count before this point.
+    s_forkServerThreadsStarted.fetch_add(1);
+#ifdef DYNAMIC_HEAP_COUNT
+    if (resumeInactive)
+    {
+        gc_idle_thread_event.Wait(INFINITE, FALSE);
+        if (s_forkGCExitRequested.load())
+        {
+            return;
+        }
+    }
+#endif
+#endif
+
     while (1)
     {
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+        if ((heap_number == 0 && s_forkServerCoordinatorStop.load()) ||
+            (heap_number != 0 && s_forkGCExitRequested.load()))
+        {
+            return;
+        }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
         if (gc_heap::dynamic_adaptation_mode == dynamic_adaptation_to_application_sizes)
         {
@@ -312,6 +360,12 @@ void gc_heap::gc_thread_function ()
             }
 #endif //DYNAMIC_HEAP_COUNT
             uint32_t wait_result = gc_heap::ee_suspend_event.Wait(wait_on_time_out_p ? wait_time : INFINITE, FALSE);
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+            if (s_forkServerCoordinatorStop.load())
+            {
+                return;
+            }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
             dprintf (9999, ("waiting for ee done res %d (timeout %d, %" PRIu64 " ms since last suspend end)(should_change_heap_count is %d) (gradual_decommit_in_progress_p %d)",
                 wait_result, wait_time, ((GetHighPrecisionTimeStamp() - last_suspended_end_time) / 1000),
@@ -416,6 +470,12 @@ void gc_heap::gc_thread_function ()
         {
             dprintf (9999, ("GC thread %d waiting_for_gc_start(%d)(gc%zd)", heap_number, n_heaps, VolatileLoadWithoutBarrier(&settings.gc_index)));
             gc_start_event.Wait(INFINITE, FALSE);
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+            if (s_forkGCExitRequested.load())
+            {
+                return;
+            }
+#endif
 #ifdef DYNAMIC_HEAP_COUNT
             dprintf (9999, ("GC thread %d waiting_done_gc_start(%d-%d)(i: %d)(gc%zd)",
                 heap_number, n_heaps, dynamic_heap_count_data.new_n_heaps, dynamic_heap_count_data.init_only_p, VolatileLoadWithoutBarrier (&settings.gc_index)));
@@ -452,6 +512,12 @@ void gc_heap::gc_thread_function ()
                             dprintf (9999, ("GC thread %d wait_on_idle(%d < %d)(gc%zd), total idle %d", heap_number, old_n_heaps, new_n_heaps,
                                 VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                             gc_idle_thread_event.Wait (INFINITE, FALSE);
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+                            if (s_forkGCExitRequested.load())
+                            {
+                                return;
+                            }
+#endif
                             dprintf (9999, ("GC thread %d waking_from_idle(%d)(gc%zd) after doing change", heap_number, n_heaps, VolatileLoadWithoutBarrier (&settings.gc_index)));
                         }
                     }
@@ -468,6 +534,12 @@ void gc_heap::gc_thread_function ()
                     dprintf (9999, ("GC thread %d wait_on_idle(< max %d)(gc%zd), total  idle %d", heap_number, num_threads_to_wake,
                         VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                     gc_idle_thread_event.Wait (INFINITE, FALSE);
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+                    if (s_forkGCExitRequested.load())
+                    {
+                        return;
+                    }
+#endif
                     dprintf (9999, ("GC thread %d waking_from_idle(%d)(gc%zd)", heap_number, n_heaps, VolatileLoadWithoutBarrier (&settings.gc_index)));
                 }
 

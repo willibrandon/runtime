@@ -1,0 +1,37 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>NativeForkProbe</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <UseNativeLibPrefix>false</UseNativeLibPrefix>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(ForkRuntimePrototype)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkGCHeapCount" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkGCHeapCount" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkGCHeapCount" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnterForkHost" />
+    <LinkerArg Include="-Wl,--undefined=RhEnterForkHost" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhEnterForkHost" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhExitForkHost" />
+    <LinkerArg Include="-Wl,--undefined=RhExitForkHost" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhExitForkHost" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+  </ItemGroup>
+  <ItemGroup Condition="'$(ForkWorkProtocol)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkWorkState" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkWorkState" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkWorkState" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+  </ItemGroup>
+</Project>

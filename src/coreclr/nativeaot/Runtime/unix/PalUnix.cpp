@@ -195,6 +195,77 @@ void PalGetPDBInfo(HANDLE hOsHandle, GUID * pGuidSignature, _Out_ uint32_t * pdw
 #endif
 }
 
+// The kernel delivers a signal sent to the process to any thread that does not
+// block it, and native hosts expect their handlers to run on their own threads.
+// A new thread inherits its creator's mask, so creators block every asynchronous
+// signal around pthread_create; attaching to the runtime unmasks only activation.
+// Faults remain deliverable to the thread that raises them.
+static int BlockAsyncSignals(sigset_t* previous)
+{
+#ifdef HOST_WASM
+    return 0;
+#else
+    sigset_t signal_set;
+    sigfillset(&signal_set);
+    sigdelset(&signal_set, SIGSEGV);
+    sigdelset(&signal_set, SIGBUS);
+    sigdelset(&signal_set, SIGFPE);
+    sigdelset(&signal_set, SIGILL);
+    sigdelset(&signal_set, SIGTRAP);
+    sigdelset(&signal_set, SIGABRT);
+    sigdelset(&signal_set, SIGSYS);
+    return pthread_sigmask(SIG_BLOCK, &signal_set, previous);
+#endif
+}
+
+static void RestoreSignalMask(const sigset_t* previous)
+{
+#ifndef HOST_WASM
+    int sigmaskRet = pthread_sigmask(SIG_SETMASK, previous, NULL);
+    _ASSERTE(sigmaskRet == 0);
+#endif
+}
+
+typedef void (*ThreadCreationCallback)();
+static ThreadCreationCallback g_threadCreationCallback;
+
+// A host can prepare for each runtime thread on the creating thread before the
+// thread starts. On Apple, sigprocmask changes every thread's mask, so a host
+// may need to route its own signals rather than rely on the masks set here.
+extern "C" __attribute__((visibility("default"))) void RhSetThreadCreationCallback(ThreadCreationCallback callback)
+{
+    g_threadCreationCallback = callback;
+}
+
+static void NotifyThreadCreation()
+{
+    ThreadCreationCallback callback = g_threadCreationCallback;
+    if (callback != nullptr)
+    {
+        callback();
+    }
+}
+
+static thread_local sigset_t t_threadCreationMask;
+static thread_local bool t_threadCreationMasked;
+
+// Managed threads start through System.Native, so CoreLib brackets that call.
+extern "C" void RhBeginThreadCreation()
+{
+    NotifyThreadCreation();
+    t_threadCreationMasked = BlockAsyncSignals(&t_threadCreationMask) == 0;
+    _ASSERTE(t_threadCreationMasked);
+}
+
+extern "C" void RhEndThreadCreation()
+{
+    if (t_threadCreationMasked)
+    {
+        t_threadCreationMasked = false;
+        RestoreSignalMask(&t_threadCreationMask);
+    }
+}
+
 static void UnmaskActivationSignal()
 {
     sigset_t signal_set;
@@ -781,7 +852,7 @@ HANDLE PalCreateEventW(_In_opt_ LPSECURITY_ATTRIBUTES pEventAttributes, UInt32_B
 
 typedef uint32_t(__stdcall *BackgroundCallback)(_In_opt_ void* pCallbackContext);
 
-bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext, UInt32_BOOL highPriority)
+bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext, UInt32_BOOL highPriority, pthread_t* joinableThread = nullptr)
 {
 #ifdef HOST_WASM
     // No threads, so we can't start one
@@ -814,12 +885,26 @@ bool PalStartBackgroundWork(_In_ BackgroundCallback callback, _In_opt_ void* pCa
     st = pthread_attr_setschedparam(&attrs, &params);
     ASSERT(st == 0);
 #endif
-    // Create the thread as detached, that means not joinable
-    st = pthread_attr_setdetachstate(&attrs, PTHREAD_CREATE_DETACHED);
+    // Server collectors retain a join handle so checkpoint preparation can wait
+    // for all native teardown. Other background threads keep their existing lifetime.
+    st = pthread_attr_setdetachstate(&attrs, joinableThread != nullptr ? PTHREAD_CREATE_JOINABLE : PTHREAD_CREATE_DETACHED);
     ASSERT(st == 0);
 
+    NotifyThreadCreation();
+    sigset_t previousMask;
+    int maskStatus = BlockAsyncSignals(&previousMask);
+    ASSERT(maskStatus == 0);
     pthread_t threadId;
     st = pthread_create(&threadId, &attrs, (void *(*)(void*))callback, pCallbackContext);
+    if (maskStatus == 0)
+    {
+        RestoreSignalMask(&previousMask);
+    }
+
+    if (st == 0 && joinableThread != nullptr)
+    {
+        *joinableThread = threadId;
+    }
 
     int st2 = pthread_attr_destroy(&attrs);
     ASSERT(st2 == 0);
@@ -840,9 +925,46 @@ bool PalSetCurrentThreadName(const char* name)
     return true;
 }
 
+void RhForkRecordBackgroundWorker();
+
 bool PalStartBackgroundGCThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
 {
     return PalStartBackgroundWork(callback, pCallbackContext, UInt32_FALSE);
+}
+
+bool PalStartJoinableThread(BackgroundCallback callback, void* context, void** handle)
+{
+    pthread_t* thread = new (nothrow) pthread_t;
+    if (thread == nullptr)
+    {
+        return false;
+    }
+
+    if (!PalStartBackgroundWork(callback, context, UInt32_FALSE, thread))
+    {
+        delete thread;
+        return false;
+    }
+
+    *handle = thread;
+    return true;
+}
+
+bool PalJoinThread(void* handle)
+{
+    pthread_t* thread = static_cast<pthread_t*>(handle);
+    if (thread == nullptr || pthread_join(*thread, nullptr) != 0)
+    {
+        return false;
+    }
+
+    delete thread;
+    return true;
+}
+
+void PalDiscardThreadHandle(void* handle)
+{
+    delete static_cast<pthread_t*>(handle);
 }
 
 bool PalStartFinalizerThread(_In_ BackgroundCallback callback, _In_opt_ void* pCallbackContext)
@@ -1309,5 +1431,6 @@ int32_t PalGetModuleFileName(_Out_ const TCHAR** pModuleNameOut, HANDLE moduleBa
 
 uint64_t PalGetCurrentOSThreadId()
 {
-    return (uint64_t)minipal_get_current_thread_id();
+    // A fork child inherits TLS caches but receives a new OS thread identity.
+    return (uint64_t)minipal_get_current_thread_id_no_cache();
 }

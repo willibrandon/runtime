@@ -1,4 +1,5 @@
 #include "ep-rt-config.h"
+#include "ds-rt-config.h"
 
 #ifdef ENABLE_PERFTRACING
 #if !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES)
@@ -210,16 +211,14 @@ EventPipeProviderCallbackDataQueue *
 ep_provider_callback_data_queue_init (EventPipeProviderCallbackDataQueue *provider_callback_data_queue)
 {
 	EP_ASSERT (provider_callback_data_queue != NULL);
-	provider_callback_data_queue->queue = dn_queue_alloc ();
-	return provider_callback_data_queue->queue ? provider_callback_data_queue : NULL;
+	return dn_queue_init (&provider_callback_data_queue->queue) ? provider_callback_data_queue : NULL;
 }
 
 void
 ep_provider_callback_data_queue_fini (EventPipeProviderCallbackDataQueue *provider_callback_data_queue)
 {
 	ep_return_void_if_nok (provider_callback_data_queue != NULL);
-	dn_queue_free (provider_callback_data_queue->queue);
-	provider_callback_data_queue->queue = NULL;
+	dn_queue_dispose (&provider_callback_data_queue->queue);
 }
 
 /*
@@ -606,6 +605,7 @@ session_init (const EventPipeSessionOptions *options)
 	// Publish the session but leave it inert: providers are not configured, no callbacks are generated, and
 	// allow_write / number_of_sessions stay untouched until the enable phase runs. The config session-walks skip
 	// sessions whose allow_write bit is clear, and producers skip them too, so an inert session is invisible.
+	ep_session_adopt_ipc_resources (session);
 	ep_volatile_store_session (ep_session_get_index (session), session);
 
 ep_on_exit:
@@ -648,10 +648,11 @@ void
 log_process_info_event (EventPipeEventSource *event_source)
 {
 	// Get the managed command line.
-	const ep_char8_t *cmd_line = ep_rt_diagnostics_command_line_get ();
+	ep_char8_t *cmd_line = ep_rt_diagnostics_command_line_get ();
 
 	// Log the process information event.
 	ep_event_source_send_process_info (event_source, cmd_line);
+	ep_rt_utf8_string_free (cmd_line);
 }
 
 // The "enable" half of session startup, run under the lock once the session has been published inert: configures
@@ -667,8 +668,9 @@ enable_holding_lock (
 
 	EP_ASSERT (session != NULL);
 
-	// Register the SampleProfiler the very first time (if supported).
-	ep_sample_profiler_init (provider_callback_data_queue);
+	// Register the SampleProfiler the very first time (if supported). A session whose sampler
+	// could not be registered still runs, but without sampling.
+	bool sampler_registered = ep_sample_profiler_init (provider_callback_data_queue);
 
 	// Mark the session writable before configuring providers so config_enable_disable's session walk
 	// includes it (see the allow_write gate in config_compute_keyword_and_level / config_register_provider).
@@ -679,7 +681,7 @@ enable_holding_lock (
 	// drain thread is running - not fired inline here.
 	config_enable_disable (ep_config_get (), session, provider_callback_data_queue, true);
 
-	if (session_requested_sampling (session))
+	if (sampler_registered && session_requested_sampling (session))
 		ep_sample_profiler_enable ();
 
 	ep_requires_lock_held ();
@@ -1478,6 +1480,101 @@ ep_enabled (void)
 			ep_volatile_load_number_of_sessions () > 0);
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+bool
+ep_prepare_for_fork (void)
+{
+	ep_requires_lock_not_held ();
+	if (!ep_rt_config_acquire ())
+		return false;
+
+	ep_sample_profiler_pause_for_fork ();
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session != NULL)
+			ep_session_pause_streaming_for_fork (session);
+	}
+
+	ep_rt_config_release ();
+	ep_requires_lock_not_held ();
+	return true;
+}
+
+bool
+ep_resume_after_fork (void)
+{
+	ep_requires_lock_not_held ();
+	if (!ep_rt_config_acquire ())
+		return false;
+
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session != NULL)
+			ep_session_resume_streaming_after_fork (session);
+	}
+
+	ep_sample_profiler_resume_after_fork ();
+	ep_rt_config_release ();
+	ep_requires_lock_not_held ();
+	return true;
+}
+
+bool
+ep_reset_child_after_fork (void)
+{
+	ep_requires_lock_not_held ();
+
+	EventPipeProviderCallbackDataQueue callback_data_queue;
+	EventPipeProviderCallbackData provider_callback_data;
+	EventPipeProviderCallbackDataQueue *provider_callback_data_queue =
+		ep_provider_callback_data_queue_init (&callback_data_queue);
+	if (provider_callback_data_queue == NULL)
+		return false;
+
+	if (!ep_rt_config_acquire ()) {
+		ep_provider_callback_data_queue_fini (provider_callback_data_queue);
+		return false;
+	}
+
+	uint32_t abandoned_sampling_sessions = 0;
+	for (uint32_t index = 0; index < EP_MAX_NUMBER_OF_SESSIONS; index++) {
+		EventPipeSession *session = ep_volatile_load_session (index);
+		if (session == NULL || session->session_type == EP_SESSION_TYPE_LISTENER ||
+			session->session_type == EP_SESSION_TYPE_SYNCHRONOUS)
+			continue;
+
+		if (session_requested_sampling (session))
+			abandoned_sampling_sessions++;
+
+		config_enable_disable (ep_config_get (), session, provider_callback_data_queue, false);
+		ep_volatile_store_allow_write (ep_volatile_load_allow_write () & ~(ep_session_get_mask (session)));
+		ep_volatile_store_session (index, NULL);
+		ep_session_wait_for_inflight_thread_ops (session);
+		ep_volatile_store_number_of_sessions (ep_volatile_load_number_of_sessions () - 1);
+		ep_session_abandon_for_fork (session);
+		// Release buffers and per-thread state without writing them, so a session that later reuses
+		// this slot is never mistaken for the parent's.
+		ep_session_close (session);
+		ep_session_dec_ref (session);
+	}
+
+	if (abandoned_sampling_sessions != 0)
+		ep_sample_profiler_abandon_sessions_after_fork (abandoned_sampling_sessions);
+
+	ep_rt_config_release ();
+
+	while (ep_provider_callback_data_queue_try_dequeue (provider_callback_data_queue, &provider_callback_data)) {
+		ep_rt_prepare_provider_invoke_callback (&provider_callback_data);
+		provider_invoke_callback (&provider_callback_data);
+		ep_provider_callback_data_fini (&provider_callback_data);
+	}
+
+	ep_provider_callback_data_queue_fini (provider_callback_data_queue);
+	ep_requires_lock_not_held ();
+	return true;
+}
+#endif
+
 EventPipeProvider *
 ep_create_provider (
 	const ep_char8_t *provider_name,
@@ -1881,11 +1978,12 @@ ep_provider_callback_data_queue_enqueue (
 	EP_ASSERT (provider_callback_data_queue != NULL);
 	EventPipeProviderCallbackData *provider_callback_data_move = ep_provider_callback_data_alloc_move (provider_callback_data);
 	ep_raise_error_if_nok (provider_callback_data_move != NULL);
-	ep_raise_error_if_nok (dn_queue_push (ep_provider_callback_data_queue_get_queue (provider_callback_data_queue), provider_callback_data_move));
+	ep_raise_error_if_nok (dn_queue_push (ep_provider_callback_data_queue_get_queue_ref (provider_callback_data_queue), provider_callback_data_move));
 
 	return true;
 
 ep_on_error:
+	provider_complete_callback (provider_callback_data_move != NULL ? provider_callback_data_move : provider_callback_data);
 	ep_provider_callback_data_free (provider_callback_data_move);
 	return false;
 }
@@ -1897,7 +1995,7 @@ ep_provider_callback_data_queue_try_dequeue (
 {
 	EP_ASSERT (provider_callback_data_queue != NULL);
 
-	dn_queue_t *queue = ep_provider_callback_data_queue_get_queue (provider_callback_data_queue);
+	dn_queue_t *queue = ep_provider_callback_data_queue_get_queue_ref (provider_callback_data_queue);
 	ep_return_false_if_nok (!dn_queue_empty (queue));
 
 	EventPipeProviderCallbackData *value = *dn_queue_front_t (queue, EventPipeProviderCallbackData *);

@@ -56,6 +56,46 @@ ds_ipc_poll (
 	uint32_t timeout_ms,
 	ds_ipc_error_callback_func callback);
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// A caller-owned wake descriptor interrupts only this poll, preserving all sockets.
+int32_t
+ds_ipc_poll_interruptible (
+	DiagnosticsIpcPollHandle *poll_handles_data,
+	size_t poll_handles_data_len,
+	uint32_t timeout_ms,
+	ds_ipc_error_callback_func callback,
+	int interrupt_fd);
+
+// Returns bytes received, zero on EOF, -1 on error, or -2 on interruption.
+int32_t
+ds_ipc_stream_read_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	uint8_t *buffer,
+	uint32_t capacity,
+	int interrupt_fd);
+
+// Returns 1 with one received descriptor, 0 on error/EOF, or -2 on interruption.
+int32_t
+ds_ipc_stream_read_fd_interruptible (
+	DiagnosticsIpcStream *ipc_stream,
+	int *data_fd,
+	int interrupt_fd);
+
+// The listener owns the stream during response capture and drain. A handler may
+// transfer the stream only after the complete response has been delivered.
+void ds_ipc_stream_begin_response (DiagnosticsIpcStream *stream);
+// Returns 1 when sent, 0 on failure, or -2 on pause; unsent bytes remain owned.
+int32_t ds_ipc_stream_resume_response (DiagnosticsIpcStream *stream, int interrupt_fd);
+uint64_t ds_ipc_stream_response_remaining (DiagnosticsIpcStream *stream);
+// Discards queued bytes and optionally releases the stream. A tracing session
+// retains its stream after the listener has delivered the start response.
+void ds_ipc_stream_end_response (DiagnosticsIpcStream *stream, bool release_stream);
+// Reserves allocation-free storage for trace bytes interrupted by a checkpoint.
+bool ds_ipc_stream_prepare_fork_output (DiagnosticsIpcStream *stream);
+// Makes trace writes and stream polling interruptible by the listener checkpoint.
+void ds_ipc_stream_set_fork_interrupt (DiagnosticsIpcStream *stream, int interrupt_fd);
+#endif
+
 // puts the DiagnosticsIpc into Listening Mode
 // Re-entrant safe
 bool

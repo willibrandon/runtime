@@ -26,6 +26,58 @@ namespace System.Runtime
     {
         internal const string RuntimeLibrary = "*";
 
+#if TARGET_UNIX
+        /// <summary>
+        /// Registers the managed framework service checkpoint with the owned native fork prototype.
+        /// </summary>
+        /// <param name="prepare">Retires services before native admission closes.</param>
+        /// <param name="parent">Resumes services in the parent.</param>
+        /// <param name="childReset">Validates inherited state before child threads start.</param>
+        /// <param name="childResume">Resumes services after child native admission opens.</param>
+        /// <returns>One for registration success, or a native error status.</returns>
+        [LibraryImport(RuntimeLibrary)]
+        internal static unsafe partial int RhRegisterForkServiceCallbacks(
+            delegate* unmanaged[Cdecl]<int> prepare,
+            delegate* unmanaged[Cdecl]<int> parent,
+            delegate* unmanaged[Cdecl]<int> childReset,
+            delegate* unmanaged[Cdecl]<int> childResume);
+
+        /// <summary>
+        /// Admits one callback unless retirement has atomically closed dispatch.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhTryEnterForkWork")]
+        internal static extern int RhTryEnterForkWork();
+
+        /// <summary>
+        /// Completes callback execution and its execution-context cleanup.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhExitForkWork")]
+        internal static extern void RhExitForkWork();
+
+        /// <summary>
+        /// Closes callback admission when the last active callback finishes.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhRequestForkWorkRetirement")]
+        internal static extern void RhRequestForkWorkRetirement();
+
+        /// <summary>
+        /// Gets whether callback admission has closed.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhIsForkWorkRetired")]
+        internal static extern int RhIsForkWorkRetired();
+
+        /// <summary>
+        /// Reopens callback admission after native recovery.
+        /// </summary>
+        [MethodImpl(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhResumeForkWork")]
+        internal static extern void RhResumeForkWork();
+#endif
+
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         [RuntimeImport(RuntimeLibrary, "RhGetThreadEntryPointAddress")]
 #if TARGET_UNIX
@@ -570,6 +622,22 @@ namespace System.Runtime
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         [RuntimeImport(RuntimeLibrary, "RhGetDefaultStackSize")]
         internal static extern unsafe IntPtr RhGetDefaultStackSize();
+
+#if TARGET_UNIX
+        /// <summary>
+        /// Blocks the calling thread's asynchronous signals so a thread it creates inherits that mask.
+        /// </summary>
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhBeginThreadCreation")]
+        internal static extern void RhBeginThreadCreation();
+
+        /// <summary>
+        /// Restores the signal mask saved by <see cref="RhBeginThreadCreation"/>.
+        /// </summary>
+        [MethodImplAttribute(MethodImplOptions.InternalCall)]
+        [RuntimeImport(RuntimeLibrary, "RhEndThreadCreation")]
+        internal static extern void RhEndThreadCreation();
+#endif
 
         [MethodImplAttribute(MethodImplOptions.InternalCall)]
         [RuntimeImport(RuntimeLibrary, "RhGetInterruptApcCallback")]

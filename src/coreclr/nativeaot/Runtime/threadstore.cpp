@@ -24,6 +24,7 @@
 #include <minipal/time.h>
 #include <minipal/thread.h>
 #include "SignalSafeThreadMap.h"
+#include "ForkSupport.h"
 
 EXTERN_C volatile uint32_t RhpTrapThreads;
 volatile uint32_t RhpTrapThreads = (uint32_t)TrapThreadsFlags::None;
@@ -98,9 +99,84 @@ void ThreadStore::Destroy()
     delete this;
 }
 
+// The caller owns m_Lock. Framework services must retire their attached workers
+// before the fork checkpoint can freeze the caller and finalizer alone.
+bool ThreadStore::HasOnlyForkThreads(Thread* caller, Thread* finalizer, bool allowBackgroundGC)
+{
+    if (caller == nullptr || finalizer == nullptr || caller == finalizer)
+    {
+        return false;
+    }
+
+    uint32_t count = 0;
+    bool callerFound = false;
+    bool finalizerFound = false;
+    FOREACH_THREAD(thread)
+    {
+        if (thread != caller && thread != finalizer && !(allowBackgroundGC && thread->IsGCSpecial()))
+        {
+            return false;
+        }
+
+        callerFound = callerFound || thread == caller;
+        finalizerFound = finalizerFound || thread == finalizer;
+        count++;
+    }
+    END_FOREACH_THREAD
+    return callerFound && finalizerFound && (count == 2 || (allowBackgroundGC && count == 3));
+}
+
+// The caller owns m_Lock. A dormant fork host must contain no other managed thread.
+bool ThreadStore::HasOnlyForkCaller(Thread* caller)
+{
+    if (caller == nullptr)
+    {
+        return false;
+    }
+
+    uint32_t count = 0;
+    bool callerFound = false;
+    FOREACH_THREAD(thread)
+    {
+        if (thread != caller)
+        {
+            return false;
+        }
+
+        callerFound = true;
+        count++;
+    }
+    END_FOREACH_THREAD
+    return callerFound && count == 1;
+}
+
+// Only the calling OS thread exists after fork; admission is still closed.
+// Do not run normal thread-exit callbacks on behalf of the vanished finalizer.
+void ThreadStore::RemoveFinalizerAfterFork(Thread* finalizer)
+{
+    m_ThreadList.RemoveFirst(finalizer);
+#if defined(TARGET_UNIX) && !defined(TARGET_WASM)
+    RemoveThreadFromSignalSafeMap(finalizer->m_threadId, finalizer);
+#endif
+}
+
+bool ThreadStore::RefreshCallerAfterFork(Thread* caller)
+{
+#if defined(TARGET_UNIX) && !defined(TARGET_WASM)
+    RemoveThreadFromSignalSafeMap(caller->m_threadId, caller);
+    caller->m_threadId = PalGetCurrentOSThreadId();
+    caller->m_hOSThread = pthread_self();
+    // The removed caller/finalizer slots ensure this insert needs no allocation.
+    return InsertThreadIntoSignalSafeMap(caller->m_threadId, caller);
+#else
+    return false;
+#endif
+}
+
 // static
 void ThreadStore::AttachCurrentThread(bool fAcquireThreadStoreLock)
 {
+    RhForkBeforeManagedEntry();
     //
     // step 1: ThreadStore::InitCurrentThread
     // step 2: add this thread to the ThreadStore
@@ -137,6 +213,12 @@ void ThreadStore::AttachCurrentThread(bool fAcquireThreadStoreLock)
 
     ThreadStore* pTS = GetThreadStore();
     CrstHolderWithState threadStoreLock(&pTS->m_Lock, fAcquireThreadStoreLock);
+    while (fAcquireThreadStoreLock && RhForkIsAdmissionClosed())
+    {
+        threadStoreLock.Release();
+        RhForkBeforeManagedEntry();
+        threadStoreLock.Acquire();
+    }
 
     //
     // Set thread state to be attached

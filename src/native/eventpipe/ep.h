@@ -193,6 +193,8 @@ ep_init_session_2 (
 	void *callback_additional_data,
 	EventPipeBufferingMode buffering_mode);
 
+// On success the session owns options->stream and options->user_events_data_fd.
+// Failure leaves both resources owned by the caller.
 EventPipeSessionID
 ep_init_session_3 (
 	const EventPipeSessionOptions *options
@@ -212,6 +214,12 @@ ep_start_session (EventPipeSessionID session_id);
 
 bool
 ep_enabled (void);
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+bool ep_prepare_for_fork (void);
+bool ep_resume_after_fork (void);
+bool ep_reset_child_after_fork (void);
+#endif
 
 EventPipeProvider *
 ep_create_provider (

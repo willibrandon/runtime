@@ -340,6 +340,7 @@ struct _IpcStreamWriter {
 EP_DEFINE_GETTER_REF(IpcStreamWriter *, ipc_stream_writer, StreamWriter *, stream_writer)
 EP_DEFINE_GETTER(IpcStreamWriter *, ipc_stream_writer, IpcStream *, ipc_stream)
 
+// The writer borrows stream; its owning session releases it after the writer.
 IpcStreamWriter *
 ep_ipc_stream_writer_alloc (
 	uint64_t id,

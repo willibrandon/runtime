@@ -201,11 +201,16 @@ ep_event_source_enable (
 
 	ep_requires_lock_held ();
 
-	bool result = true;
 	EventPipeSessionProvider *session_provider = ep_session_provider_alloc (event_source->provider_name, (uint64_t)-1, EP_EVENT_LEVEL_LOGALWAYS, NULL, NULL, NULL);
-	if (session_provider != NULL)
-		result = ep_session_add_session_provider (session, session_provider);
-	return result;
+	if (session_provider == NULL)
+		return false;
+
+	if (!ep_session_add_session_provider (session, session_provider)) {
+		ep_session_provider_free (session_provider);
+		return false;
+	}
+
+	return true;
 }
 
 void

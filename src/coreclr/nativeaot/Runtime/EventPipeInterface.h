@@ -4,6 +4,9 @@
 #ifndef EVENTPIPE_INTERFACE_H
 #define EVENTPIPE_INTERFACE_H
 
+// Reports the linked diagnostics implementation, independently of environment settings.
+bool EventPipe_IsSupported();
+
 // Initialize EventPipe
 void EventPipe_Initialize();
 
@@ -17,6 +20,12 @@ void EventPipe_ThreadShutdown();
 
 void EventPipe_Shutdown();
 bool DiagnosticServer_Shutdown();
+
+// Retire and recreate diagnostics workers while preserving parent sessions.
+bool EventPipe_PrepareForFork();
+bool EventPipe_ResumeParentAfterFork();
+bool EventPipe_ResetChildAfterFork();
+bool EventPipe_ResumeChildAfterFork();
 
 void EventTracing_Initialize();
 #endif //EVENTPIPE_INTERFACE_H

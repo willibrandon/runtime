@@ -1,0 +1,20 @@
+<Project>
+  <PropertyGroup>
+    <RuntimeFrameworkVersion>11.0.0-rc.2.26504.105</RuntimeFrameworkVersion>
+    <!-- SDK 11 publishes Native AOT without the full build yet still copies the documentation file from the empty
+         output directory. Publish through the full build, as SDK 10 does. -->
+    <UseOptimizedPublish>false</UseOptimizedPublish>
+  </PropertyGroup>
+
+  <Target Name="_SelectForkProbeCompiler" BeforeTargets="ProcessFrameworkReferences"
+          Condition="'$(PublishAot)' == 'true'">
+    <Error Condition="'$(TargetFramework)' != 'net11.0'"
+           Text="These fork probes require the net11.0 target matching the runtime under test." />
+    <ItemGroup>
+      <KnownILCompilerPack Update="Microsoft.DotNet.ILCompiler"
+                           Condition="'%(KnownILCompilerPack.TargetFramework)' == '$(TargetFramework)'">
+        <ILCompilerPackVersion>11.0.0-rc.2.26504.105</ILCompilerPackVersion>
+      </KnownILCompilerPack>
+    </ItemGroup>
+  </Target>
+</Project>

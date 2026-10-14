@@ -2,6 +2,7 @@
 // The .NET Foundation licenses this file to you under the MIT license.
 
 #include <eventpipe/ep-rt-config.h>
+#include <eventpipe/ds-rt-config.h>
 
 #ifdef ENABLE_PERFTRACING
 #include <eventpipe/ep-types.h>
@@ -216,7 +217,7 @@ ep_rt_aot_execute_rundown (dn_vector_ptr_t* execution_checkpoints)
     ETW::EnumerationLog::EndRundown();
 }
 
-const ep_char8_t *
+ep_char8_t *
 ep_rt_aot_diagnostics_command_line_get (void)
 {
     // shipping criteria: no EVENTPIPE-NATIVEAOT-TODO left in the codebase
@@ -227,19 +228,20 @@ ep_rt_aot_diagnostics_command_line_get (void)
 #elif TARGET_LINUX
     FILE *cmdline_file = ::fopen("/proc/self/cmdline", "r");
     if (cmdline_file == nullptr)
-        return "";
+        return ep_rt_utf8_string_dup("");
 
     char *line = NULL;
     size_t line_len = 0;
     if (::getline (&line, &line_len, cmdline_file) == -1) {
         ::fclose (cmdline_file);
-        return "";
+        ::free (line);
+        return ep_rt_utf8_string_dup("");
     }
 
     ::fclose (cmdline_file);
-    return reinterpret_cast<const ep_char8_t*>(line);
+    return reinterpret_cast<ep_char8_t*>(line);
 #else
-    return "";
+    return ep_rt_utf8_string_dup("");
 #endif
 }
 
@@ -438,6 +440,26 @@ void ep_rt_aot_set_server_name (void)
     PalSetCurrentThreadName(".NET EventPipe");
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+static void* s_diagnosticsServerThread;
+
+bool ep_rt_aot_join_server_thread()
+{
+    if (s_diagnosticsServerThread == nullptr)
+    {
+        return true;
+    }
+
+    if (!PalJoinThread(s_diagnosticsServerThread))
+    {
+        return false;
+    }
+
+    s_diagnosticsServerThread = nullptr;
+    return true;
+}
+#endif
+
 bool
 ep_rt_aot_thread_create (
     void *thread_func,
@@ -459,7 +481,12 @@ ep_rt_aot_thread_create (
 
     case EP_THREAD_TYPE_SERVER:
         // Match CoreCLR and hardcode a null thread context in this case.
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+        return s_diagnosticsServerThread == nullptr &&
+            PalStartJoinableThread(reinterpret_cast<BackgroundCallback>(thread_func), nullptr, &s_diagnosticsServerThread);
+#else
         return PalStartEventPipeHelperThread(reinterpret_cast<BackgroundCallback>(thread_func), nullptr);
+#endif
 
     case EP_THREAD_TYPE_SESSION:
     case EP_THREAD_TYPE_SAMPLING:
@@ -627,7 +654,8 @@ ep_rt_aot_spin_lock_alloc (ep_rt_spin_lock_handle_t *spin_lock)
     // EventPipe library will intialize using thread, EventPipeBufferManager instances and will maintain these on the EventPipe library side
 
     spin_lock->lock = new (nothrow) CrstStatic ();
-    spin_lock->lock->InitNoThrow (CrstType::CrstEventPipe);
+    if (spin_lock->lock != NULL)
+        spin_lock->lock->InitNoThrow (CrstType::CrstEventPipe);
 }
 
 void
@@ -636,6 +664,7 @@ ep_rt_aot_spin_lock_free (ep_rt_spin_lock_handle_t *spin_lock)
     STATIC_CONTRACT_NOTHROW;
 
     if (spin_lock && spin_lock->lock) {
+        spin_lock->lock->Destroy ();
         delete spin_lock->lock;
         spin_lock->lock = NULL;
     }

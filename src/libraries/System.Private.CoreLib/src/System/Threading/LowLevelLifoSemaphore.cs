@@ -287,6 +287,46 @@ namespace System.Threading
             MaybeWakeWaiter(counts);
         }
 
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Makes one shutdown credit available per worker after ordinary activation has stopped.
+        /// </summary>
+        /// <param name="workerCount">The number of worker loops that can still enter a wait.</param>
+        internal void WakeForForkRetirement(int workerCount)
+        {
+            for (int additional = workerCount - _separated._counts.SignalCount; additional > 0; additional--)
+            {
+                Signal();
+            }
+        }
+
+        /// <summary>
+        /// Clears the wait state only after every waiter has returned, so a forked child keeps no
+        /// credits or blockers that belonged to threads it does not have.
+        /// </summary>
+        /// <returns>Whether no waiter or blocker remains.</returns>
+        internal bool ResetAfterForkRetirement()
+        {
+            _blockerStackLock.Acquire();
+            try
+            {
+                if (_separated._counts.WaiterCount != 0 || _blockerStack != null)
+                {
+                    return false;
+                }
+
+                _separated = default;
+                _racingUnblocks = 0;
+                _pendingWake = 0;
+                return true;
+            }
+            finally
+            {
+                _blockerStackLock.Release();
+            }
+        }
+#endif
+
         private bool Block(int timeoutMs)
         {
             Debug.Assert(timeoutMs >= -1);

@@ -805,6 +805,9 @@ EP_RT_DEFINE_THREAD_FUNC (ep_rt_thread_aot_start_session_or_sampling_thread)
         thread_params->thread = ep_rt_aot_setup_thread ();
     }
 
+    extern void ep_rt_aot_set_server_name (void);
+    ep_rt_aot_set_server_name ();
+
     size_t result = thread_params->thread_func (thread_params);
     delete thread_params;
     return result;
@@ -1462,11 +1465,11 @@ ep_rt_managed_command_line_get (void)
 }
 
 static
-const ep_char8_t *
+ep_char8_t *
 ep_rt_diagnostics_command_line_get (void)
 {
     STATIC_CONTRACT_NOTHROW;
-    extern const ep_char8_t * ep_rt_aot_diagnostics_command_line_get (void);
+    extern ep_char8_t * ep_rt_aot_diagnostics_command_line_get (void);
     return ep_rt_aot_diagnostics_command_line_get();
 }
 

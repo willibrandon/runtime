@@ -9,6 +9,10 @@
 #include "ep.h"
 #include "ds-rt.h"
 
+#if HAVE_UNISTD_H
+#include <unistd.h>
+#endif
+
 /*
  * Forward declares of all static functions.
  */
@@ -175,10 +179,21 @@ eventpipe_protocol_helper_stop_tracing (
 	DiagnosticsIpcStream *stream);
 
 static
-bool
+int32_t
 eventpipe_protocol_helper_collect_tracing (
 	EventPipeCollectTracingCommandPayload *payload,
-	DiagnosticsIpcStream *stream);
+	DiagnosticsIpcStream *stream,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id);
+
+static
+int32_t
+eventpipe_protocol_helper_handle_ipc_message (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	EventPipeCollectTracingCommandPayload **payload,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id);
 
 static
 bool
@@ -659,6 +674,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -695,6 +713,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -730,6 +751,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -765,6 +789,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -833,6 +860,9 @@ ep_on_exit:
 	return (uint8_t *)instance;
 
 ep_on_error:
+	if (instance == NULL)
+		ep_rt_byte_array_free (buffer);
+
 	ds_eventpipe_collect_tracing_command_payload_free (instance);
 	instance = NULL;
 	ep_exit_error_handler ();
@@ -942,8 +972,10 @@ eventpipe_protocol_helper_stop_tracing (
 	ep_return_false_if_nok (message != NULL && stream != NULL);
 
 	bool result = false;
-	EventPipeStopTracingCommandPayload *payload;
-	payload = (EventPipeStopTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_protocol_helper_stop_tracing_try_parse_payload);
+	EventPipeStopTracingCommandPayload *payload = NULL;
+	// A stop request carries exactly one session id; reject truncated or padded messages.
+	if (ds_ipc_message_get_size (message) == sizeof (DiagnosticsIpcHeader) + sizeof (uint64_t))
+		payload = (EventPipeStopTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_protocol_helper_stop_tracing_try_parse_payload);
 
 	if (!payload) {
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
@@ -968,25 +1000,48 @@ ep_on_error:
 }
 
 static
-bool
+int32_t
 eventpipe_protocol_helper_collect_tracing (
 	EventPipeCollectTracingCommandPayload *payload,
-	DiagnosticsIpcStream *stream)
+	DiagnosticsIpcStream *stream,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id)
 {
-	ep_return_false_if_nok (stream != NULL);
+	ep_return_zero_if_nok (stream != NULL);
 
 	if (!payload) {
 		ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
-		return false;
+		ds_ipc_stream_free (stream);
+		return 0;
 	}
 
 	int user_events_data_fd = -1;
 	if (payload->session_type == EP_SESSION_TYPE_USEREVENTS) {
-		if (!ds_ipc_stream_read_fd (stream, &user_events_data_fd)) {
+		int32_t descriptor_result;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		descriptor_result = ds_ipc_stream_read_fd_interruptible (stream, &user_events_data_fd, interrupt_fd);
+#else
+		(void)interrupt_fd;
+		descriptor_result = ds_ipc_stream_read_fd (stream, &user_events_data_fd) ? 1 : 0;
+#endif
+		if (descriptor_result == -2)
+			return -2;
+
+		if (descriptor_result == 0) {
 			ds_ipc_message_send_error (stream, DS_IPC_E_BAD_ENCODING);
-			return false;
+			ds_ipc_stream_free (stream);
+			return 0;
 		}
 	}
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	if (payload->session_type == EP_SESSION_TYPE_IPCSTREAM &&
+		!ds_ipc_stream_prepare_fork_output (stream)) {
+		ds_ipc_message_send_error (stream, DS_IPC_E_FAIL);
+		ds_ipc_stream_free (stream);
+		return 0;
+	}
+#endif
 
 	EventPipeSessionOptions options;
 	ep_session_options_init(
@@ -1013,19 +1068,29 @@ eventpipe_protocol_helper_collect_tracing (
 		ds_ipc_message_send_error (stream, DS_IPC_E_FAIL);
 		ep_raise_error ();
 	} else {
-		eventpipe_protocol_helper_send_start_tracing_success (stream, session_id);
-		ep_start_session (session_id);
+		if (!eventpipe_protocol_helper_send_start_tracing_success (stream, session_id)) {
+			ep_disable (session_id);
+			goto ep_on_exit;
+		}
+
+		if (pending_session_id != NULL)
+			*pending_session_id = session_id;
+		else
+			ep_start_session (session_id);
 	}
 
 	result = true;
 
 ep_on_exit:
 	ep_session_options_fini(&options);
-	ds_eventpipe_collect_tracing_command_payload_free (payload);
-	return result;
+	return result ? 1 : 0;
 
 ep_on_error:
 	EP_ASSERT (!result);
+#if HAVE_UNISTD_H
+	if (user_events_data_fd != -1)
+		close (user_events_data_fd);
+#endif
 	ds_ipc_stream_free (stream);
 	ep_exit_error_handler ();
 }
@@ -1054,46 +1119,102 @@ ds_eventpipe_protocol_helper_handle_ipc_message (
 	DiagnosticsIpcMessage *message,
 	DiagnosticsIpcStream *stream)
 {
-	ep_return_false_if_nok (message != NULL && stream != NULL);
+	EventPipeCollectTracingCommandPayload *payload = NULL;
+	EventPipeSessionID pending_session_id = 0;
+	int32_t result = eventpipe_protocol_helper_handle_ipc_message (
+		message,
+		stream,
+		&payload,
+		-1,
+		&pending_session_id);
+	EP_ASSERT (result != -2 && payload == NULL);
+	if (pending_session_id != 0)
+		ep_start_session (pending_session_id);
 
-	bool result = false;
-	EventPipeCollectTracingCommandPayload* payload = NULL;
+	return result == 1;
+}
+
+static
+int32_t
+eventpipe_protocol_helper_handle_ipc_message (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	EventPipeCollectTracingCommandPayload **payload,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id)
+{
+	ep_return_zero_if_nok (message != NULL && stream != NULL && payload != NULL);
+
+	int32_t result = 0;
+	if (pending_session_id != NULL)
+		*pending_session_id = 0;
 
 	switch ((EventPipeCommandId)ds_ipc_header_get_commandid (ds_ipc_message_get_header_cref (message))) {
 	case EP_COMMANDID_COLLECT_TRACING:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_COLLECT_TRACING_2:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing2_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing2_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_COLLECT_TRACING_3:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing3_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing3_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_COLLECT_TRACING_4:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing4_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing4_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_COLLECT_TRACING_5:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing5_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing5_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_COLLECT_TRACING_6:
-		payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing6_command_try_parse_payload);
-		result = eventpipe_protocol_helper_collect_tracing (payload, stream);
+		if (*payload == NULL)
+			*payload = (EventPipeCollectTracingCommandPayload *)ds_ipc_message_try_parse_payload (message, eventpipe_collect_tracing6_command_try_parse_payload);
+		result = eventpipe_protocol_helper_collect_tracing (*payload, stream, interrupt_fd, pending_session_id);
 		break;
 	case EP_COMMANDID_STOP_TRACING:
-		result = eventpipe_protocol_helper_stop_tracing (message, stream);
+		EP_ASSERT (*payload == NULL);
+		result = eventpipe_protocol_helper_stop_tracing (message, stream) ? 1 : 0;
 		break;
 	default:
-		result = eventpipe_protocol_helper_unknown_command (message, stream);
+		EP_ASSERT (*payload == NULL);
+		result = eventpipe_protocol_helper_unknown_command (message, stream) ? 1 : 0;
 		break;
+	}
+
+	if (result != -2) {
+		ds_eventpipe_collect_tracing_command_payload_free (*payload);
+		*payload = NULL;
 	}
 
 	return result;
 }
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+int32_t
+ds_eventpipe_protocol_helper_resume_ipc_message (
+	DiagnosticsIpcMessage *message,
+	DiagnosticsIpcStream *stream,
+	EventPipeCollectTracingCommandPayload **payload,
+	int interrupt_fd,
+	EventPipeSessionID *pending_session_id)
+{
+	return eventpipe_protocol_helper_handle_ipc_message (
+		message,
+		stream,
+		payload,
+		interrupt_fd,
+		pending_session_id);
+}
+#endif
 
 #endif /* !defined(DS_INCLUDE_SOURCE_FILES) || defined(DS_FORCE_INCLUDE_SOURCE_FILES) */
 #endif /* ENABLE_PERFTRACING */

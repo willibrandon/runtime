@@ -607,6 +607,33 @@ namespace System.Threading
             _loggingEnabled = FrameworkEventSource.Log.IsEnabled(EventLevel.Verbose, FrameworkEventSource.Keywords.ThreadPool | FrameworkEventSource.Keywords.ThreadTransfer);
         }
 
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Checks that retiring workers released all assignable queue ownership.
+        /// </summary>
+        /// <returns>Whether no worker owns an assigned global queue.</returns>
+        internal bool CompleteForkRetirement()
+        {
+            _queueAssignmentLock.Acquire();
+            try
+            {
+                foreach (int count in _assignedWorkItemQueueThreadCounts)
+                {
+                    if (count != 0)
+                    {
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                _queueAssignmentLock.Release();
+            }
+
+            return true;
+        }
+#endif
+
         public void Enqueue(object callback, bool forceGlobal)
         {
             Debug.Assert((callback is IThreadPoolWorkItem) ^ (callback is Task));
@@ -981,6 +1008,31 @@ namespace System.Threading
                     }
                 }
 
+#if NATIVEAOT && TARGET_UNIX
+                if (System.Runtime.RuntimeImports.RhTryEnterForkWork() == 0)
+                {
+                    if (workItem != null)
+                    {
+                        if (tl.isProcessingHighPriorityWorkItems)
+                        {
+                            workQueue.EnqueueAtHighPriority(workItem);
+                        }
+                        else
+                        {
+                            workQueue.Enqueue(workItem, forceGlobal: true);
+                        }
+                    }
+
+                    TransferAllLocalWorkItemsToHighPriorityGlobalQueue(tl);
+                    tl.isProcessingHighPriorityWorkItems = false;
+                    if (s_assignableWorkItemQueueCount > 0)
+                    {
+                        workQueue.UnassignWorkItemQueue(tl);
+                    }
+
+                    return DispatchResult.Regular;
+                }
+#endif
                 if (workQueue._loggingEnabled && FrameworkEventSource.Log.IsEnabled())
                 {
                     FrameworkEventSource.Log.ThreadPoolDequeueWorkObject(workItem);
@@ -1016,6 +1068,9 @@ namespace System.Threading
 
                 // Reset thread state after all user code for the work item has completed
                 currentThread.ResetThreadPoolThread();
+#if NATIVEAOT && TARGET_UNIX
+                System.Runtime.RuntimeImports.RhExitForkWork();
+#endif
 
                 //
                 // Notify the VM that we executed this workitem.  This is also our opportunity to ask whether Hill Climbing wants
@@ -1144,6 +1199,19 @@ namespace System.Threading
             threadLocalCompletionCountNode = ThreadPool.GetOrCreateThreadLocalCompletionCountNode();
         }
 
+
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Removes this exiting worker's local queue without waiting for its finalizer.
+        /// </summary>
+        internal void RetireForFork()
+        {
+            ThreadPoolWorkQueue.TransferAllLocalWorkItemsToHighPriorityGlobalQueue(this);
+            ThreadPoolWorkQueue.WorkStealingQueueList.Remove(workStealingQueue);
+            GC.SuppressFinalize(this);
+            threadLocals = null;
+        }
+#endif
 
         ~ThreadPoolWorkQueueThreadLocals()
         {

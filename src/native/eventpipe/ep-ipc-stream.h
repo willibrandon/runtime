@@ -22,6 +22,7 @@ typedef bool (*IpcStreamWriteFunc)(void *object, const uint8_t *buffer, uint32_t
 typedef bool (*IpcStreamFlushFunc)(void *object);
 typedef bool (*IpcStreamCloseFunc)(void *object);
 typedef IpcPollEvents (*IpcStreamPollFunc)(void *object, uint32_t timeout_ms);
+typedef void (*IpcStreamAbandonForkFunc)(void *object);
 
 struct _IpcStreamVtable {
 	IpcStreamFreeFunc free_func;
@@ -30,6 +31,7 @@ struct _IpcStreamVtable {
 	IpcStreamFlushFunc flush_func;
 	IpcStreamCloseFunc close_func;
 	IpcStreamPollFunc poll_func;
+	IpcStreamAbandonForkFunc abandon_fork_func;
 };
 
 #if defined(EP_INLINE_GETTER_SETTER) || defined(EP_IMPL_IPC_STREAM_GETTER_SETTER) || defined(DS_IMPL_IPC_PAL_NAMEDPIPE_GETTER_SETTER) || defined(DS_IMPL_IPC_PAL_SOCKET_GETTER_SETTER)
@@ -81,6 +83,8 @@ ep_ipc_stream_close_vcall (IpcStream *ipc_stream);
 
 IpcPollEvents
 ep_ipc_stream_poll_vcall (IpcStream *ipc_stream, uint32_t timeout_ms);
+
+void ep_ipc_stream_abandon_for_fork_vcall (IpcStream *ipc_stream);
 
 #endif /* ENABLE_PERFTRACING */
 #endif /* __EVENTPIPE_IPC_STREAM_H__ */

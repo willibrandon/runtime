@@ -203,6 +203,11 @@ HRESULT GCHeap::Init(size_t hn)
 //System wide initialization
 HRESULT GCHeap::Initialize()
 {
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+    // An externally loaded collector cannot borrow this built-in heap's fork API.
+    s_forkOwnedGCHeap = this;
+#endif
+
 #ifndef TRACE_GC
     STRESS_LOG0 (LF_GC, LL_ALWAYS, "TraceGC is not turned on");
 #endif
@@ -517,6 +522,13 @@ HRESULT GCHeap::Initialize()
     }
     gc_heap::n_max_heaps = nhp;
     gc_heap::n_heaps = nhp;
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+    s_forkServerThreads = new (nothrow) void*[nhp]();
+    if (s_forkServerThreads == nullptr)
+    {
+        return E_OUTOFMEMORY;
+    }
+#endif
     hr = gc_heap::initialize_gc (seg_size, large_seg_size, pin_seg_size, nhp);
 #else
     hr = gc_heap::initialize_gc (seg_size, large_seg_size, pin_seg_size);

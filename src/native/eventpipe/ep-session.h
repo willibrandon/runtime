@@ -69,9 +69,16 @@ struct _EventPipeSession_Internal {
 	volatile uint32_t ref_count;
 	// The user_events_data file descriptor to register Tracepoints and write user_events to.
 	int user_events_data_fd;
-	// The IPC continuation stream from initializing the session through the diagnostic server
-	// Currently only initialized for user_events sessions.
+	// IPC continuation stream, borrowed until the session is committed by enable.
 	IpcStream *stream;
+	// Successful enable transfers the stream and user_events descriptor to this session.
+	bool owns_ipc_resources;
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+	// The fork checkpoint stopped this session's writer without disabling the session.
+	bool fork_streaming_paused;
+	// The replacement IPC writer must deliver output retained at the checkpoint.
+	bool fork_streaming_resuming;
+#endif
 };
 
 #if !defined(EP_INLINE_GETTER_SETTER) && !defined(EP_IMPL_SESSION_GETTER_SETTER)
@@ -153,6 +160,11 @@ ep_session_write_sequence_point_unbuffered (EventPipeSession *session);
 void
 ep_session_start_streaming (EventPipeSession *session);
 
+// Commit ownership only after all fallible session setup has succeeded.
+// _Requires_lock_held (ep)
+void
+ep_session_adopt_ipc_resources (EventPipeSession *session);
+
 // Determine if the session is valid or not.
 // Invalid sessions can be detected before they are enabled.
 bool
@@ -229,6 +241,13 @@ ep_session_type_uses_buffer_manager (EventPipeSessionType session_type);
 
 bool
 ep_session_type_uses_streaming_thread (EventPipeSessionType session_type);
+
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+// Called with the EventPipe lock held. The session and buffered events remain live.
+void ep_session_pause_streaming_for_fork (EventPipeSession *session);
+void ep_session_resume_streaming_after_fork (EventPipeSession *session);
+void ep_session_abandon_for_fork (EventPipeSession *session);
+#endif
 
 #endif /* ENABLE_PERFTRACING */
 #endif /* __EVENTPIPE_SESSION_H__ */

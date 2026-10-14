@@ -1,0 +1,29 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <TargetFramework>net11.0</TargetFramework>
+    <OutputType>Library</OutputType>
+    <AssemblyName>NativeForkProbe</AssemblyName>
+    <PublishAot>true</PublishAot>
+    <NativeLib>Shared</NativeLib>
+    <UseNativeLibPrefix>false</UseNativeLibPrefix>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <Nullable>enable</Nullable>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+    <EnforceCodeStyleInBuild>true</EnforceCodeStyleInBuild>
+    <AnalysisLevel>latest-recommended</AnalysisLevel>
+    <ManagePackageVersionsCentrally>false</ManagePackageVersionsCentrally>
+  </PropertyGroup>
+  <ItemGroup Condition="'$(ForkRuntimePrototype)' == 'true'">
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkGCHeapCount" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkGCHeapCount" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkGCHeapCount" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhEnableForkSupport" />
+    <LinkerArg Include="-Wl,--undefined=RhEnableForkSupport" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhEnableForkSupport" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <IlcArg Include="--export-dynamic-symbol:RhGetForkGCActiveObservationCount" />
+    <LinkerArg Include="-Wl,--undefined=RhGetForkGCActiveObservationCount" Condition="!$(RuntimeIdentifier.StartsWith('osx-'))" />
+    <LinkerArg Include="-Wl,-u,_RhGetForkGCActiveObservationCount" Condition="$(RuntimeIdentifier.StartsWith('osx-'))" />
+  </ItemGroup>
+</Project>

@@ -970,6 +970,9 @@ void gc_heap::garbage_collect (int n)
             (should_do_blocking_collection == FALSE) &&
             gc_can_use_concurrent &&
             !temp_disable_concurrent_p &&
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+            !s_forkGCAdmissionClosed.load() &&
+#endif
             ((settings.pause_mode == pause_interactive) || (settings.pause_mode == pause_sustained_low_latency)))
         {
             keep_bgc_threads_p = TRUE;
@@ -1249,6 +1252,10 @@ void gc_heap::garbage_collect (int n)
             }
             else
             {
+                // do_pre_gc selected a new BGC record before thread/mark-array
+                // setup could fail. This collection will now be blocking, so
+                // preserve the previous completed background record.
+                last_bgc_info_index = !last_bgc_info_index;
                 settings.compaction = TRUE;
                 c_write (settings.concurrent, FALSE);
             }

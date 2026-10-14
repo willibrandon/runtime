@@ -71,7 +71,11 @@ namespace System.Threading
                 stackSize = RuntimeImports.RhGetDefaultStackSize();
             }
 
-            if (!Interop.Sys.CreateThread(stackSize, RuntimeImports.RhGetThreadEntryPointAddress(), GCHandle<Thread>.ToIntPtr(thisThreadHandle)))
+            // The new thread must leave signals sent to the process to the host's own threads.
+            RuntimeImports.RhBeginThreadCreation();
+            bool created = Interop.Sys.CreateThread(stackSize, RuntimeImports.RhGetThreadEntryPointAddress(), GCHandle<Thread>.ToIntPtr(thisThreadHandle));
+            RuntimeImports.RhEndThreadCreation();
+            if (!created)
             {
                 return false;
             }

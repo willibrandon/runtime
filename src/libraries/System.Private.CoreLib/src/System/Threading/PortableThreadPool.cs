@@ -171,6 +171,10 @@ namespace System.Threading
 
             _separated.counts.NumThreadsGoal = _minThreads;
 
+#if NATIVEAOT && TARGET_UNIX
+            ForkThreadServices.RegisterPool(this);
+#endif
+
 #if TARGET_WINDOWS
             InitializeIOOnWindows();
 #endif
@@ -486,6 +490,30 @@ namespace System.Threading
 
         internal void EnsureWorkerRequested()
         {
+#if NATIVEAOT && TARGET_UNIX
+            if (!ForkThreadServices.TryEnterActivation())
+            {
+                return;
+            }
+
+            try
+            {
+                EnsureWorkerRequestedCore();
+            }
+            finally
+            {
+                ForkThreadServices.ExitActivation();
+            }
+#else
+            EnsureWorkerRequestedCore();
+#endif
+        }
+
+        /// <summary>
+        /// Publishes a worker request while framework activation is admitted.
+        /// </summary>
+        private void EnsureWorkerRequestedCore()
+        {
             // Only one worker is requested at a time to mitigate Thundering Herd problem.
             if (_separated._hasOutstandingThreadRequest == 0 &&
                 Interlocked.Exchange(ref _separated._hasOutstandingThreadRequest, 1) == 0)
@@ -494,6 +522,98 @@ namespace System.Threading
                 GateThread.EnsureRunning(this);
             }
         }
+
+#if NATIVEAOT && TARGET_UNIX
+        /// <summary>
+        /// Wakes existing framework threads so their ordinary wait and cleanup paths can return.
+        /// </summary>
+        /// <returns>Whether the initialized services are supported by the idle checkpoint.</returns>
+        internal bool RequestForkRetirement()
+        {
+            _waitThreadLock.Acquire();
+            try
+            {
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
+                {
+                    current.Thread.RequestForkRetirement();
+                }
+            }
+            finally
+            {
+                _waitThreadLock.Release();
+            }
+
+            WorkerThread.RequestForkRetirement();
+            GateThread.RequestForkRetirement();
+            return true;
+        }
+
+        /// <summary>
+        /// Normalizes thread activity after every recorded service thread has completed cleanup.
+        /// </summary>
+        /// <returns>Whether all semaphore waiters and queue assignments retired normally.</returns>
+        internal bool CompleteForkRetirement()
+        {
+            _waitThreadLock.Acquire();
+            try
+            {
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
+                {
+                    if (!current.Thread.IsRetiredForFork)
+                    {
+                        return false;
+                    }
+                }
+            }
+            finally
+            {
+                _waitThreadLock.Release();
+            }
+
+            if (!WorkerThread.CompleteForkRetirement() || !ThreadPool.s_workQueue.CompleteForkRetirement())
+            {
+                return false;
+            }
+
+            GateThread.CompleteForkRetirement();
+            short goal = Math.Clamp(_separated.counts.NumThreadsGoal, _minThreads, _maxThreads);
+            _separated = default;
+            _separated.counts.NumThreadsGoal = goal;
+            _separated.lastDispatchTime = Environment.TickCount;
+            _separated.priorCompletionCount = (int)_completionCounter.Count;
+            _separated.priorCompletedWorkRequestsTime = Environment.TickCount;
+            _separated.nextCompletedWorkRequestsTime = Environment.TickCount + _threadAdjustmentIntervalMs;
+            _currentSampleStartTime = Stopwatch.GetTimestamp();
+            _numThreadsBeingKeptAlive = 0;
+            _numBlockedThreads = 0;
+            _numThreadsAddedDueToBlocking = 0;
+            _pendingBlockingAdjustment = PendingBlockingAdjustment.None;
+            _countsOfThreadsProcessingUserCallbacks = default;
+            return true;
+        }
+
+        /// <summary>
+        /// Issues a fresh queue-inspection request after native recovery reopens activation.
+        /// </summary>
+        internal void ResumeAfterFork()
+        {
+            _separated.lastDispatchTime = Environment.TickCount;
+            Interlocked.Exchange(ref _separated._hasOutstandingThreadRequest, 0);
+            EnsureWorkerRequested();
+            _waitThreadLock.Acquire();
+            try
+            {
+                for (WaitThreadNode? current = _waitThreadsHead; current != null; current = current.Next)
+                {
+                    current.Thread.ResumeAfterFork();
+                }
+            }
+            finally
+            {
+                _waitThreadLock.Release();
+            }
+        }
+#endif
 
         private bool OnGen2GCCallback()
         {

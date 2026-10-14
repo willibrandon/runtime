@@ -21,8 +21,12 @@
 #include "thread.inl"
 
 #include "yieldprocessornormalized.h"
+#include "ForkSupport.h"
 
 GPTR_DECL(Thread, g_pFinalizerThread);
+#ifdef TARGET_UNIX
+static void* g_pFinalizerThreadHandle;
+#endif
 
 CLREventStatic g_FinalizerEvent;
 CLREventStatic g_FinalizerDoneEvent;
@@ -65,10 +69,15 @@ uint32_t WINAPI FinalizerStart(void* pContext)
     pThread->SetSuppressGcStress();
 
     g_pFinalizerThread = PTR_Thread(pThread);
+    RhForkRegisterFinalizer(pThread);
 
     // Wait for a finalization request.
     uint32_t uResult = PalWaitForSingleObjectEx(hFinalizerEvent, INFINITE, FALSE);
     ASSERT(uResult == WAIT_OBJECT_0);
+    if (!RhForkFinalizerCheckpoint())
+    {
+        return 0;
+    }
 
     // Since we just consumed the request (and the event is auto-reset) we must set the event again so the
     // managed finalizer code will immediately start processing the queue when we run it.
@@ -78,8 +87,6 @@ uint32_t WINAPI FinalizerStart(void* pContext)
     // Run the managed portion of the finalizer. This call will never return.
 
     ProcessFinalizers();
-
-    ASSERT(!"Finalizer thread should never return");
     return 0;
 }
 
@@ -96,10 +103,46 @@ bool RhInitializeFinalization()
     g_lowMemoryNotification = PalCreateLowMemoryResourceNotification();
 
     // Create the finalizer thread itself.
+#ifdef TARGET_UNIX
+    if (!PalStartJoinableThread(FinalizerStart, (void*)g_FinalizerEvent.GetOSEvent(), &g_pFinalizerThreadHandle))
+#else
     if (!PalStartFinalizerThread(FinalizerStart, (void*)g_FinalizerEvent.GetOSEvent()))
+#endif
         return false;
 
     return true;
+}
+
+bool RhJoinFinalization()
+{
+#ifdef TARGET_UNIX
+    void* handle = g_pFinalizerThreadHandle;
+    if (handle != nullptr && !PalJoinThread(handle))
+    {
+        return false;
+    }
+
+    g_pFinalizerThreadHandle = nullptr;
+#endif
+    return true;
+}
+
+void RhDiscardFinalizationAfterFork()
+{
+#ifdef TARGET_UNIX
+    PalDiscardThreadHandle(g_pFinalizerThreadHandle);
+    g_pFinalizerThreadHandle = nullptr;
+#endif
+}
+
+// The old finalizer has detached through its normal thread cleanup path, so both
+// event objects have no waiters in either a recovered child or a resumed host.
+bool RhRestartFinalization()
+{
+    g_pFinalizerThread = nullptr;
+    g_FinalizerEvent.CloseEvent();
+    g_FinalizerDoneEvent.CloseEvent();
+    return RhInitializeFinalization();
 }
 
 #ifdef TARGET_WINDOWS
@@ -117,6 +160,8 @@ void RhEnableFinalization()
 }
 
 static int32_t g_fullGcCountSeenByFinalization;
+// Only the finalizer accesses this flag, spanning its entire managed pass.
+static bool g_finalizerForkWorkActive;
 
 // Indicate that the current round of finalizations is complete.
 EXTERN_C void QCALLTYPE RhpSignalFinalizationComplete(uint32_t fcount, int32_t observedFullGcCount)
@@ -174,6 +219,12 @@ EXTERN_C void QCALLTYPE RhWaitForPendingFinalizers(UInt32_BOOL allowReentrantWai
 // (returns false and the finalizer thread should initiate a garbage collection).
 EXTERN_C UInt32_BOOL QCALLTYPE RhpWaitForFinalizerRequest()
 {
+    if (g_finalizerForkWorkActive)
+    {
+        RhExitForkWork();
+        g_finalizerForkWorkActive = false;
+    }
+
     // We can wait for two events; finalization queue has been populated and low memory resource notification.
     // But if the latter is signalled we shouldn't wait on it again immediately -- if the garbage collection
     // the finalizer thread initiates as a result is not sufficient to remove the low memory condition the
@@ -189,12 +240,36 @@ EXTERN_C UInt32_BOOL QCALLTYPE RhpWaitForFinalizerRequest()
     // two second timeout expires.
     do
     {
+        if (!RhForkFinalizerCheckpoint())
+        {
+            return 2;
+        }
         HANDLE  lowMemEvent = g_lowMemoryNotification;
         HANDLE  rgWaitHandles[] = { g_FinalizerEvent.GetOSEvent(), lowMemEvent };
         uint32_t  cWaitHandles = (fLastEventWasLowMemory || (lowMemEvent == NULL)) ? 1 : 2;
         uint32_t  uTimeout = fLastEventWasLowMemory ? 2000 : INFINITE;
 
         uint32_t uResult = PalCompatibleWaitAny(/*alertable=*/ FALSE, uTimeout, cWaitHandles, rgWaitHandles, /*allowReentrantWait=*/ FALSE);
+        if (!RhForkFinalizerCheckpoint())
+        {
+            return 2;
+        }
+
+        if (uResult == WAIT_OBJECT_0 || uResult == WAIT_OBJECT_0 + 1)
+        {
+            while (RhTryEnterForkWork() == 0)
+            {
+                // Retirement can precede the finalizer checkpoint request.
+                // Remain outside managed frames and all event waits.
+                if (!RhForkFinalizerCheckpoint())
+                {
+                    return 2;
+                }
+                PalSleep(1);
+            }
+
+            g_finalizerForkWorkActive = true;
+        }
 
         switch (uResult)
         {

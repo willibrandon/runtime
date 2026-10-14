@@ -11,6 +11,7 @@
 #include "RestrictedCallouts.h"
 
 #include "RhConfig.h"
+#include "ForkSupport.h"
 #include "GcEnum.h"
 
 #include "thread.h"
@@ -547,8 +548,13 @@ struct ThreadStubArguments
     const char* m_name;
 };
 
-static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, const char* name)
+static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, const char* name, void** joinHandle = nullptr)
 {
+    if (joinHandle == nullptr)
+    {
+        RhForkRecordBackgroundWorker();
+    }
+
     ThreadStubArguments* threadStubArgs = new (nothrow) ThreadStubArguments();
     if (!threadStubArgs)
         return false;
@@ -595,7 +601,16 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
             return 0;
         };
 
-    if (!PalStartBackgroundGCThread(threadStub, threadStubArgs))
+    bool started;
+#ifdef TARGET_UNIX
+    started = joinHandle != nullptr
+        ? PalStartJoinableThread(threadStub, threadStubArgs, joinHandle)
+        : PalStartBackgroundGCThread(threadStub, threadStubArgs);
+#else
+    ASSERT(joinHandle == nullptr);
+    started = PalStartBackgroundGCThread(threadStub, threadStubArgs);
+#endif
+    if (!started)
     {
         delete[] threadStubArgs->m_name;
         delete threadStubArgs;
@@ -604,6 +619,18 @@ static bool CreateNonSuspendableThread(void (*threadStart)(void*), void* arg, co
 
     return true;
 }
+
+#ifdef TARGET_UNIX
+extern "C" bool RhCreateServerGCThreadForFork(void (*start)(void*), void* context, void** handle)
+{
+    return CreateNonSuspendableThread(start, context, ".NET Server GC", handle);
+}
+
+extern "C" bool RhJoinServerGCThreadForFork(void* handle)
+{
+    return PalJoinThread(handle);
+}
+#endif
 
 bool GCToEEInterface::CreateThread(void (*threadStart)(void*), void* arg, bool is_suspendable, const char* name)
 {

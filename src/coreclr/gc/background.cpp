@@ -3035,6 +3035,230 @@ void gc_heap::kill_gc_thread()
     bgc_thread = 0;
 }
 
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+int32_t gc_heap::fork_heap_count(bool maximum)
+{
+#ifdef MULTIPLE_HEAPS
+    return maximum ? n_max_heaps : VolatileLoad(&n_heaps);
+#else
+    UNREFERENCED_PARAMETER(maximum);
+    return 1;
+#endif
+}
+
+bool gc_heap::prepare_for_fork(uint32_t timeoutMilliseconds)
+{
+    bool expected = false;
+    if (!s_forkGCAdmissionClosed.compare_exchange_strong(expected, true))
+    {
+        return false;
+    }
+
+    uint32_t elapsed = 0;
+    bool observedActive = false;
+    while (true)
+    {
+        bool idle = false;
+        if (try_enter_spin_lock(&gc_lock))
+        {
+            idle = !settings.concurrent && !is_bgc_in_progress();
+            if (!idle && !observedActive)
+            {
+                s_forkGCActiveObservations.fetch_add(1);
+                observedActive = true;
+            }
+
+            leave_spin_lock(&gc_lock);
+        }
+
+        if (idle)
+        {
+            break;
+        }
+
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+#ifdef MULTIPLE_HEAPS
+    // Heap zero can initiate DATAS heap-count changes without a new allocation.
+    // Let it finish with every other collector available before stopping peers.
+    s_forkServerCoordinatorStop.store(true);
+    ee_suspend_event.Set();
+    while (s_forkServerCoordinatorRunning.load())
+    {
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+    if (!RhJoinServerGCThreadForFork(s_forkServerThreads[0]))
+    {
+        return false;
+    }
+
+    s_forkServerThreads[0] = nullptr;
+    int count = n_max_heaps;
+#else
+    int count = 1;
+#endif
+
+    s_forkGCExitRequested.store(true);
+    for (int index = 0; index < count; index++)
+    {
+#ifdef MULTIPLE_HEAPS
+        gc_heap* heap = g_heaps[index];
+#ifdef DYNAMIC_HEAP_COUNT
+        if (index != 0)
+        {
+            heap->gc_idle_thread_event.Set();
+            heap->bgc_idle_thread_event.Set();
+        }
+#endif
+#else
+        gc_heap* heap = pGenGCHeap;
+#endif
+        heap->bgc_threads_timeout_cs.Enter();
+        if (heap->bgc_thread_running)
+        {
+            heap->bgc_start_event.Set();
+        }
+
+        heap->bgc_threads_timeout_cs.Leave();
+    }
+
+#ifdef MULTIPLE_HEAPS
+    gc_start_event.Set();
+#endif
+    while (true)
+    {
+        bool retired = true;
+        for (int index = 0; index < count; index++)
+        {
+#ifdef MULTIPLE_HEAPS
+            gc_heap* heap = g_heaps[index];
+#else
+            gc_heap* heap = pGenGCHeap;
+#endif
+            heap->bgc_threads_timeout_cs.Enter();
+            retired &= !heap->bgc_thread_running && heap->bgc_thread == nullptr;
+            heap->bgc_threads_timeout_cs.Leave();
+        }
+
+#ifdef MULTIPLE_HEAPS
+        retired &= s_forkServerThreadsRunning.load() == 0;
+#endif
+        if (retired)
+        {
+            break;
+        }
+
+        if (elapsed++ == timeoutMilliseconds)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+#ifdef MULTIPLE_HEAPS
+    for (int index = 1; index < count; index++)
+    {
+        if (!RhJoinServerGCThreadForFork(s_forkServerThreads[index]))
+        {
+            return false;
+        }
+
+        s_forkServerThreads[index] = nullptr;
+#ifdef DYNAMIC_HEAP_COUNT
+        g_heaps[index]->gc_idle_thread_event.Reset();
+        g_heaps[index]->bgc_idle_thread_event.Reset();
+#endif
+    }
+
+    ee_suspend_event.Reset();
+    gc_start_event.Reset();
+#ifdef DYNAMIC_HEAP_COUNT
+    total_bgc_threads = 0;
+    last_total_bgc_threads = 0;
+    dynamic_heap_count_data.idle_bgc_thread_count = 0;
+#endif
+#endif
+    // Server collectors share this manual event. Keep it signaled until every
+    // background collector has left its wait, then reset it once for recovery.
+    if (bgc_start_event.IsValid())
+    {
+        bgc_start_event.Reset();
+    }
+
+    s_forkGCReady.store(true);
+    return true;
+}
+
+bool gc_heap::resume_after_fork()
+{
+    if (!s_forkGCReady.load() || !s_forkGCAdmissionClosed.load())
+    {
+        return false;
+    }
+
+    s_forkGCExitRequested.store(false);
+#ifdef MULTIPLE_HEAPS
+    s_forkServerRestart = true;
+    s_forkServerCoordinatorStop.store(false);
+    s_forkServerThreadsStarted.store(0);
+    for (int index = 1; index < n_max_heaps; index++)
+    {
+        if (!g_heaps[index]->create_gc_thread())
+        {
+            return false;
+        }
+    }
+
+    uint32_t elapsed = 0;
+    while (s_forkServerThreadsStarted.load() != n_max_heaps - 1)
+    {
+        if (elapsed++ == 10000)
+        {
+            return false;
+        }
+
+        GCToOSInterface::Sleep(1);
+    }
+
+    if (!g_heaps[0]->create_gc_thread())
+    {
+        return false;
+    }
+#endif
+    s_forkGCReady.store(false);
+    s_forkGCAdmissionClosed.store(false);
+    return true;
+}
+
+bool gc_heap::retire_bgc_for_fork()
+{
+    if (!s_forkGCExitRequested.load())
+    {
+        return false;
+    }
+
+    bgc_threads_timeout_cs.Enter();
+    bgc_thread_running = FALSE;
+    bgc_thread = nullptr;
+    bgc_thread_id.Clear();
+    bgc_threads_timeout_cs.Leave();
+    return true;
+}
+#endif // GC_NATIVEAOT_FORK_CHECKPOINTS
+
 void gc_heap::bgc_thread_function()
 {
     assert (background_gc_done_event.IsValid());
@@ -3053,6 +3277,12 @@ void gc_heap::bgc_thread_function()
         dprintf (6666, ("h%d bgc thread: waiting...", heap_number));
 
         cooperative_mode = enable_preemptive ();
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+        if (retire_bgc_for_fork())
+        {
+            break;
+        }
+#endif
         //current_thread->m_fPreemptiveGCDisabled = 0;
 
         uint32_t result = bgc_start_event.Wait(
@@ -3075,6 +3305,13 @@ void gc_heap::bgc_thread_function()
         // not calling disable_preemptive here 'cause we
         // can't wait for GC complete here - RestartEE will be called
         // when we've done the init work.
+
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+        if (retire_bgc_for_fork())
+        {
+            break;
+        }
+#endif
 
         if (result == WAIT_TIMEOUT)
         {

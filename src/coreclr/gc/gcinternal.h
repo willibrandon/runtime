@@ -46,6 +46,14 @@
 #endif // TARGET_AMD64 || TARGET_ARM64
 #include "introsort.h"
 
+// Native AOT hosts that fork, such as PostgreSQL backends, quiesce and restore the collector's
+// threads around each fork. The state lives in gc.cpp and is shared by the files that use it.
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+     (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
+#define GC_NATIVEAOT_FORK_CHECKPOINTS
+#include <atomic>
+#endif
+
 #ifdef SERVER_GC
 namespace SVR {
 #else // SERVER_GC
@@ -54,6 +62,27 @@ namespace WKS {
 
 #include "gcimpl.h"
 #include "gcpriv.h"
+
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+// These gates do not modify configured GC modes or temporary BGC-disable counts.
+extern std::atomic<bool> s_forkGCAdmissionClosed;
+extern std::atomic<bool> s_forkGCExitRequested;
+extern std::atomic<bool> s_forkGCReady;
+extern std::atomic<uint64_t> s_forkGCActiveObservations;
+extern IGCHeap* s_forkOwnedGCHeap;
+
+#ifdef SERVER_GC
+extern void** s_forkServerThreads;
+extern std::atomic<int> s_forkServerThreadsRunning;
+extern std::atomic<int> s_forkServerThreadsStarted;
+extern std::atomic<bool> s_forkServerCoordinatorStop;
+extern std::atomic<bool> s_forkServerCoordinatorRunning;
+extern bool s_forkServerRestart;
+
+extern "C" bool RhCreateServerGCThreadForFork(void (*start)(void*), void* context, void** handle);
+extern "C" bool RhJoinServerGCThreadForFork(void* handle);
+#endif // SERVER_GC
+#endif // GC_NATIVEAOT_FORK_CHECKPOINTS
 
 #ifdef DACCESS_COMPILE
 #error this source file should not be compiled with DACCESS_COMPILE!

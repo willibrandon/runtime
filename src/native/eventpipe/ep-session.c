@@ -1,4 +1,5 @@
 #include "ep-rt-config.h"
+#include "ds-rt-config.h"
 
 #ifdef ENABLE_PERFTRACING
 #if !defined(EP_INCLUDE_SOURCE_FILES) || defined(EP_FORCE_INCLUDE_SOURCE_FILES)
@@ -105,7 +106,14 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 	ep_rt_volatile_store_uint32_t (&session->started, 1);
 
 	{ // The drain runs on a native thread, so no GC-mode transition is needed here.
-		if (ep_session_type_uses_buffer_manager (session->session_type)) {
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+		if (session->fork_streaming_resuming) {
+			EP_ASSERT (session->session_type == EP_SESSION_TYPE_IPCSTREAM && session->stream != NULL);
+			success = ep_ipc_stream_flush_vcall (session->stream);
+			session->fork_streaming_resuming = false;
+		}
+#endif
+		if (success && ep_session_type_uses_buffer_manager (session->session_type)) {
 			ep_rt_wait_event_handle_t *wait_event = ep_session_get_wait_event (session);
 			while (ep_session_get_streaming_enabled (session)) {
 				bool events_written = false;
@@ -123,7 +131,7 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 				const uint32_t timeout_ns = 100000000; // 100 msec.
 				ep_rt_thread_sleep (timeout_ns);
 			}
-		} else if (session->session_type == EP_SESSION_TYPE_USEREVENTS) {
+		} else if (success && session->session_type == EP_SESSION_TYPE_USEREVENTS) {
 			// In a user events session we only monitor the stream to stop the session if it closes.
 			while (ep_session_get_streaming_enabled (session)) {
 				EP_ASSERT (session->stream != NULL);
@@ -136,7 +144,7 @@ EP_RT_DEFINE_THREAD_FUNC (streaming_thread)
 				const uint32_t timeout_ns = 100000000; // 100 msec.
 				ep_rt_thread_sleep (timeout_ns);
 			}
-		} else {
+		} else if (success) {
 			EP_UNREACHABLE ("Unsupported session type for streaming thread.");
 		}
 		ep_rt_wait_event_set (&session->rt_thread_shutdown_event);
@@ -297,6 +305,7 @@ ep_session_alloc (
 	EventPipeSession *instance = ep_rt_object_alloc (EventPipeSession);
 	ep_raise_error_if_nok (instance != NULL);
 	ep_session_inc_ref (instance);
+	instance->user_events_data_fd = -1;
 
 	instance->providers = ep_session_provider_list_alloc (providers, providers_len);
 	ep_raise_error_if_nok (instance->providers != NULL);
@@ -355,6 +364,7 @@ ep_session_alloc (
 	case EP_SESSION_TYPE_IPCSTREAM:
 		ipc_stream_writer = ep_ipc_stream_writer_alloc ((uint64_t)instance, stream);
 		ep_raise_error_if_nok (ipc_stream_writer != NULL);
+		instance->stream = stream;
 		instance->file = ep_file_alloc (ep_ipc_stream_writer_get_stream_writer_ref (ipc_stream_writer), format);
 		ep_raise_error_if_nok (instance->file != NULL);
 		ipc_stream_writer = NULL;
@@ -414,10 +424,13 @@ session_free (EventPipeSession *session)
 
 	ep_rt_wait_event_free (&session->rt_thread_shutdown_event);
 
+	session_disable_user_events (session);
 	ep_session_provider_list_free (session->providers);
 
 	ep_buffer_manager_free (session->buffer_manager);
 	ep_file_free (session->file);
+	if (session->owns_ipc_resources)
+		ep_ipc_stream_free_vcall (session->stream);
 
 	// Close the user_events data fd if still open. For a USEREVENTS session that was enabled,
 	// ep_session_disable already closed it and set it to -1 (making this a no-op); this also releases it for
@@ -441,6 +454,14 @@ ep_session_close (EventPipeSession *session)
 
 	if (ep_session_type_uses_buffer_manager (session->session_type))
 		ep_buffer_manager_close (session->buffer_manager);
+}
+
+void
+ep_session_adopt_ipc_resources (EventPipeSession *session)
+{
+	ep_requires_lock_held ();
+	EP_ASSERT (session != NULL && !session->owns_ipc_resources);
+	session->owns_ipc_resources = true;
 }
 
 EventPipeSessionProvider *
@@ -647,6 +668,50 @@ ep_session_disable (EventPipeSession *session)
 	ep_session_provider_list_clear (session->providers);
 }
 
+#ifdef DS_NATIVEAOT_FORK_LISTENER
+void
+ep_session_pause_streaming_for_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	ep_requires_lock_held ();
+
+	if (!ep_session_type_uses_streaming_thread (session->session_type) ||
+		!ep_session_get_streaming_enabled (session))
+		return;
+
+	EP_ASSERT (!session->fork_streaming_paused);
+	session->fork_streaming_paused = true;
+	session_disable_streaming_thread (session);
+}
+
+void
+ep_session_resume_streaming_after_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	ep_requires_lock_held ();
+
+	if (!session->fork_streaming_paused)
+		return;
+
+	EP_ASSERT (!ep_session_get_streaming_enabled (session));
+	session->fork_streaming_resuming = session->session_type == EP_SESSION_TYPE_IPCSTREAM;
+	session->fork_streaming_paused = false;
+	session_create_streaming_thread (session);
+}
+
+void
+ep_session_abandon_for_fork (EventPipeSession *session)
+{
+	EP_ASSERT (session != NULL);
+	EP_ASSERT (!ep_session_get_streaming_enabled (session));
+	ep_requires_lock_held ();
+
+	ep_file_abandon_for_fork (session->file);
+	if (session->owns_ipc_resources && session->stream != NULL)
+		ep_ipc_stream_abandon_for_fork_vcall (session->stream);
+}
+#endif
+
 bool
 ep_session_write_all_buffers_to_file (EventPipeSession *session, bool *events_written)
 {
@@ -679,7 +744,8 @@ session_disable_user_events (EventPipeSession *session)
 	} DN_LIST_FOREACH_END;
 
 #if HAVE_UNISTD_H
-	close (session->user_events_data_fd);
+	if (session->owns_ipc_resources)
+		close (session->user_events_data_fd);
 #endif // HAVE_UNISTD_H
 	session->user_events_data_fd = -1;
 }

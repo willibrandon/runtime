@@ -550,6 +550,18 @@ ep_ipc_stream_poll_vcall (IpcStream *ipc_stream, uint32_t timeout_ms)
 	return vtable->poll_func (ipc_stream, timeout_ms);
 }
 
+void
+ep_ipc_stream_abandon_for_fork_vcall (IpcStream *ipc_stream)
+{
+	ep_return_void_if_nok (ipc_stream != NULL);
+
+	EP_ASSERT (ipc_stream->vtable != NULL);
+	IpcStreamVtable *vtable = ipc_stream->vtable;
+
+	EP_ASSERT (vtable->abandon_fork_func != NULL);
+	vtable->abandon_fork_func (ipc_stream);
+}
+
 /*
  * IpcStreamWriter.
  */
@@ -594,7 +606,7 @@ ep_ipc_stream_writer_alloc (
 		&instance->stream_writer,
 		&ipc_stream_writer_vtable) != NULL);
 
-	//Ownership transferred.
+	// Borrowed from the session, which owns the continuation stream.
 	instance->ipc_stream = stream;
 
 ep_on_exit:
@@ -611,7 +623,6 @@ ep_ipc_stream_writer_free (IpcStreamWriter *ipc_stream_writer)
 {
 	ep_return_void_if_nok (ipc_stream_writer != NULL);
 
-	ep_ipc_stream_free_vcall (ipc_stream_writer->ipc_stream);
 	ep_stream_writer_fini (&ipc_stream_writer->stream_writer);
 	ep_rt_object_free (ipc_stream_writer);
 }

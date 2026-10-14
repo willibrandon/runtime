@@ -24,6 +24,61 @@ namespace SVR {
 namespace WKS {
 #endif // SERVER_GC
 
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+std::atomic<bool> s_forkGCAdmissionClosed(false);
+std::atomic<bool> s_forkGCExitRequested(false);
+std::atomic<bool> s_forkGCReady(false);
+std::atomic<uint64_t> s_forkGCActiveObservations(0);
+IGCHeap* s_forkOwnedGCHeap;
+
+static_assert(__atomic_always_lock_free(sizeof(uint64_t), nullptr), "Fork observations require a lock-free 64-bit counter.");
+
+#ifdef SERVER_GC
+void** s_forkServerThreads;
+std::atomic<int> s_forkServerThreadsRunning(0);
+std::atomic<int> s_forkServerThreadsStarted(0);
+std::atomic<bool> s_forkServerCoordinatorStop(false);
+std::atomic<bool> s_forkServerCoordinatorRunning(false);
+bool s_forkServerRestart;
+
+extern "C" bool RhIsOwnedServerGCForFork(IGCHeap* heap)
+{
+    return heap != nullptr && heap == s_forkOwnedGCHeap;
+}
+
+extern "C" bool RhPrepareServerGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds)
+{
+    return RhIsOwnedServerGCForFork(heap) && gc_heap::prepare_for_fork(timeoutMilliseconds);
+}
+
+extern "C" bool RhIsServerGCReadyForFork() { return s_forkGCReady.load(); }
+
+extern "C" bool RhResumeServerGCForFork() { return gc_heap::resume_after_fork(); }
+
+extern "C" uint64_t RhGetServerForkGCActiveObservationCount() { return s_forkGCActiveObservations.load(); }
+
+extern "C" int32_t RhGetServerForkGCHeapCount(bool maximum) { return gc_heap::fork_heap_count(maximum); }
+#else
+// The workstation collector's objects are linked into both runtime flavors, so they cannot tell
+// whether a server collector is present. The runtime's fork support chooses the owning collector.
+extern "C" uint64_t RhGetWorkstationForkGCActiveObservationCount() { return s_forkGCActiveObservations.load(); }
+
+extern "C" bool RhIsOwnedWorkstationGCForFork(IGCHeap* heap)
+{
+    return heap != nullptr && heap == s_forkOwnedGCHeap;
+}
+
+extern "C" bool RhPrepareWorkstationGCForFork(IGCHeap* heap, uint32_t timeoutMilliseconds)
+{
+    return RhIsOwnedWorkstationGCForFork(heap) && gc_heap::prepare_for_fork(timeoutMilliseconds);
+}
+
+extern "C" bool RhIsWorkstationGCReadyForFork() { return s_forkOwnedGCHeap != nullptr && s_forkGCReady.load(); }
+
+extern "C" bool RhResumeWorkstationGCForFork() { return s_forkOwnedGCHeap != nullptr && gc_heap::resume_after_fork(); }
+#endif // SERVER_GC
+#endif // GC_NATIVEAOT_FORK_CHECKPOINTS
+
 uint64_t gc_rand::x = 0;
 
 #if defined(BACKGROUND_GC) && defined(FEATURE_EVENT_TRACE)
@@ -4035,6 +4090,14 @@ void gc_heap::gc_thread_stub (void* arg)
     GCToOSInterface::BoostThreadPriority();
     void* tmp = _alloca (256*heap->heap_number);
     heap->gc_thread_function();
+#ifdef GC_NATIVEAOT_FORK_CHECKPOINTS
+    if (heap->heap_number == 0)
+    {
+        s_forkServerCoordinatorRunning.store(false);
+    }
+
+    s_forkServerThreadsRunning.fetch_sub(1);
+#endif
 }
 #ifdef _MSC_VER
 #pragma warning(pop)
