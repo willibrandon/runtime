@@ -5636,7 +5636,7 @@ public:
     /***************************************************************************************************/
     // public methods                                                                                  //
     /***************************************************************************************************/
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     static int32_t fork_heap_count(bool maximum);
     static bool prepare_for_fork(uint32_t timeoutMilliseconds);

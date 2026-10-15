@@ -5,6 +5,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import platform
 import select
 import signal
 import socket
@@ -15,6 +16,9 @@ import tempfile
 from connect import read_line
 from listener import accept_reverse, command, pause, resume
 from run import HEADER, MAGIC, process_info, receive
+
+# The process-info response names the runtime identifier the probe was published for.
+RUNTIME_IDENTIFIER = "linux-arm64" if platform.machine() in ("aarch64", "arm64") else "linux-x64"
 
 
 CASES = ["blocked", "repeated", "half-close", "peer-close", "reverse", "complete", "lifetime", "native-children"]
@@ -113,7 +117,7 @@ def check_identity_version(endpoint, identity, command_id):
             offset += 2 * length
         expected = identity["fields"][:3] if command_id == 0 else identity["fields"]
         if command_id == 8:
-            expected = expected + ["linux-x64"]
+            expected = expected + [RUNTIME_IDENTIFIER]
         assert fields == expected, fields
         assert offset == len(body) and peer.recv(1) == b""
 

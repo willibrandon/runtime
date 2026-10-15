@@ -28,7 +28,7 @@
 #include "gcenv.inl"
 #include "gceventstatus.h"
 
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 #include <atomic>
 #endif
@@ -60,7 +60,7 @@ namespace WKS {
 #include "gcimpl.h"
 #include "gcpriv.h"
 
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 // These gates do not modify configured GC modes or temporary BGC-disable counts.
 static std::atomic<bool> s_forkGCAdmissionClosed(false);
@@ -7228,7 +7228,7 @@ void set_thread_affinity_for_heap (int heap_number, uint16_t proc_no)
 bool gc_heap::create_gc_thread ()
 {
     dprintf (3, ("Creating gc thread\n"));
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     s_forkServerThreadsRunning.fetch_add(1);
     if (heap_number == 0)
@@ -7264,7 +7264,7 @@ void gc_heap::gc_thread_function ()
 
     heap_select::init_cpu_mapping(heap_number);
 
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 #ifdef DYNAMIC_HEAP_COUNT
     bool resumeInactive = s_forkServerRestart &&
@@ -7287,7 +7287,7 @@ void gc_heap::gc_thread_function ()
 
     while (1)
     {
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
         if ((heap_number == 0 && s_forkServerCoordinatorStop.load()) ||
             (heap_number != 0 && s_forkGCExitRequested.load()))
@@ -7334,7 +7334,7 @@ void gc_heap::gc_thread_function ()
             }
 #endif //DYNAMIC_HEAP_COUNT
             uint32_t wait_result = gc_heap::ee_suspend_event.Wait(wait_on_time_out_p ? wait_time : INFINITE, FALSE);
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
             if (s_forkServerCoordinatorStop.load())
             {
@@ -7445,7 +7445,7 @@ void gc_heap::gc_thread_function ()
         {
             dprintf (9999, ("GC thread %d waiting_for_gc_start(%d)(gc%Id)", heap_number, n_heaps, VolatileLoadWithoutBarrier(&settings.gc_index)));
             gc_start_event.Wait(INFINITE, FALSE);
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
             if (s_forkGCExitRequested.load())
             {
@@ -7488,7 +7488,7 @@ void gc_heap::gc_thread_function ()
                             dprintf (9999, ("GC thread %d wait_on_idle(%d < %d)(gc%Id), total idle %d", heap_number, old_n_heaps, new_n_heaps,
                                 VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                             gc_idle_thread_event.Wait (INFINITE, FALSE);
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
                             if (s_forkGCExitRequested.load())
                             {
@@ -7511,7 +7511,7 @@ void gc_heap::gc_thread_function ()
                     dprintf (9999, ("GC thread %d wait_on_idle(< max %d)(gc%Id), total  idle %d", heap_number, num_threads_to_wake,
                         VolatileLoadWithoutBarrier (&settings.gc_index), VolatileLoadWithoutBarrier (&dynamic_heap_count_data.idle_thread_count)));
                     gc_idle_thread_event.Wait (INFINITE, FALSE);
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
                     if (s_forkGCExitRequested.load())
                     {
@@ -24823,7 +24823,7 @@ void gc_heap::garbage_collect (int n)
             (should_do_blocking_collection == FALSE) &&
             gc_can_use_concurrent &&
             !temp_disable_concurrent_p &&
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
             !s_forkGCAdmissionClosed.load() &&
 #endif
@@ -38381,7 +38381,7 @@ void gc_heap::gc_thread_stub (void* arg)
     GCToOSInterface::BoostThreadPriority();
     void* tmp = _alloca (256*heap->heap_number);
     heap->gc_thread_function();
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     if (heap->heap_number == 0)
     {
@@ -40490,7 +40490,7 @@ void gc_heap::kill_gc_thread()
     bgc_thread = 0;
 }
 
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 int32_t gc_heap::fork_heap_count(bool maximum)
 {
@@ -40733,7 +40733,7 @@ void gc_heap::bgc_thread_function()
         dprintf (6666, ("h%d bgc thread: waiting...", heap_number));
 
         cooperative_mode = enable_preemptive ();
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
         if (retire_bgc_for_fork())
         {
@@ -40763,7 +40763,7 @@ void gc_heap::bgc_thread_function()
         // can't wait for GC complete here - RestartEE will be called
         // when we've done the init work.
 
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
         if (retire_bgc_for_fork())
         {
@@ -49804,7 +49804,7 @@ HRESULT GCHeap::Init(size_t hn)
 //System wide initialization
 HRESULT GCHeap::Initialize()
 {
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     // An externally loaded collector cannot borrow this built-in heap's fork API.
     s_forkOwnedGCHeap = this;
@@ -50099,7 +50099,7 @@ HRESULT GCHeap::Initialize()
     }
     gc_heap::n_max_heaps = nhp;
     gc_heap::n_heaps = nhp;
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
     s_forkServerThreads = new (nothrow) void*[nhp]();
     if (s_forkServerThreads == nullptr)
