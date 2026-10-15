@@ -48,7 +48,7 @@
 
 // Native AOT hosts that fork, such as PostgreSQL backends, quiesce and restore the collector's
 // threads around each fork. The state lives in gc.cpp and is shared by the files that use it.
-#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if defined(FEATURE_NATIVEAOT) && ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(BUILD_AS_STANDALONE)
 #define GC_NATIVEAOT_FORK_CHECKPOINTS
 #include <atomic>

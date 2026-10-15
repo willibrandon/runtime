@@ -14,7 +14,7 @@
 #include "EventPipeInterface.h"
 #include "ForkSupport.h"
 
-#if ((defined(TARGET_LINUX) && defined(TARGET_AMD64)) || \
+#if ((defined(TARGET_LINUX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64))) || \
      (defined(TARGET_OSX) && (defined(TARGET_AMD64) || defined(TARGET_ARM64)))) && !defined(DACCESS_COMPILE)
 
 #include <atomic>
